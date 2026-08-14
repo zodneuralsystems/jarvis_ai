@@ -204,13 +204,71 @@ class HermesAPI:
     def get_session_id(self, name: str, force_new: bool = False) -> str:
         state = self._load_state()
         sid = state.get(name)
-        if sid and not force_new:
+
+        def session_matches_model(session_id: str) -> bool:
+            try:
+                check = requests.get(
+                    f"{self.base}/api/sessions/{session_id}",
+                    headers=self.headers(),
+                    timeout=10,
+                )
+                if not check.ok:
+                    return False
+                session = (check.json().get("session") or check.json())
+                return session.get("model") == self.cfg.get("model")
+            except Exception:
+                return False
+
+        if sid and not force_new and session_matches_model(sid):
             return sid
+        if sid:
+            state.pop(name, None)
+            self._save_state(state)
+
+        title_taken = False
+        if not force_new:
+            try:
+                existing = requests.get(
+                    f"{self.base}/api/sessions",
+                    headers=self.headers(),
+                    timeout=15,
+                )
+                if existing.ok:
+                    for item in existing.json().get("data") or []:
+                        if item.get("title") != name or not item.get("id"):
+                            continue
+                        if item.get("model") == self.cfg.get("model"):
+                            sid = item["id"]
+                            state[name] = sid
+                            self._save_state(state)
+                            return sid
+                        title_taken = True
+            except Exception:
+                pass
+
+        create_title = name if not (force_new or title_taken) else f"{name}-{int(time.time())}"
         r = requests.post(f"{self.base}/api/sessions", headers=self.headers(),
-                          json={"title": name}, timeout=15)
+                          json={"title": create_title}, timeout=15)
+
+        if r.status_code == 400 and "invalid_title" in r.text:
+            existing = requests.get(
+                f"{self.base}/api/sessions",
+                headers=self.headers(),
+                timeout=15,
+            )
+            existing.raise_for_status()
+            for item in existing.json().get("data") or []:
+                if item.get("title") == name and item.get("id") and item.get("model") == self.cfg.get("model"):
+                    sid = item["id"]
+                    state[name] = sid
+                    self._save_state(state)
+                    return sid
+
         r.raise_for_status()
         data = r.json()
         sid = (data.get("session") or data).get("id")
+        if not sid:
+            raise RuntimeError(f"Hermes session creation returned no id: {data}")
         state[name] = sid
         self._save_state(state)
         print(f"Created Hermes session '{name}' -> {sid}", flush=True)
@@ -227,10 +285,20 @@ class HermesAPI:
 
     def chat_stream_events(self, session_id: str, input_text: str, timeout: float) -> Iterator[tuple[str, str]]:
         """Yield ("run"|"text"|"tool"|"approval"|"final", value) from a session turn."""
+        model = self.cfg.get("model")
+        provider = self.cfg.get("provider")
+        if not model or not provider:
+            raise RuntimeError("Hermes model and provider must be configured")
+        payload = {
+            "input": input_text,
+            "provider": provider,
+            "model": model,
+            "require_model_lock": True,
+        }
         resp = requests.post(
             f"{self.base}/api/sessions/{session_id}/chat/stream",
             headers={**self.headers(), "Accept": "text/event-stream"},
-            json={"input": input_text}, stream=True, timeout=(10, timeout),
+            json=payload, stream=True, timeout=(10, timeout),
         )
         if resp.status_code >= 400:
             resp.close()
@@ -258,6 +326,9 @@ class HermesAPI:
             except json.JSONDecodeError:
                 continue
             ev = event_name or data.get("event", "")
+            runtime = data.get("runtime")
+            if runtime and ev in ("run.started", "assistant.completed"):
+                print(f"Hermes {ev} runtime {json.dumps(runtime, sort_keys=True)}", flush=True)
             if ev == "run.started":
                 yield ("run", data.get("run_id") or "")
             elif ev == "assistant.delta":
@@ -299,18 +370,43 @@ class VoicePipelineServer:
         self.turn_counter = 0
         self.hermes = HermesAPI(cfg)
         self.stt_lock = asyncio.Lock()
-        self.recorder = AudioToTextRecorder(
-            model=cfg["stt"]["model"],
-            use_microphone=False,
-            spinner=False,
-            device=cfg["stt"].get("device", "cpu"),
-            compute_type=cfg["stt"].get("compute_type", "int8"),
-            sample_rate=int(cfg["stt"].get("sample_rate", 16000)),
-            language="en",
-            beam_size=1,
-            faster_whisper_vad_filter=False,
-            no_log_file=True,
-        )
+        # Avoid potential initialization storm by lazy loading for now
+        self._recorder = None
+        self._recorder_init_failed = False
+
+
+    @property
+    def recorder(self):
+        if getattr(self, "_recorder_init_failed", False):
+            return None
+
+        if self._recorder is None:
+            try:
+                self._recorder = AudioToTextRecorder(
+                    model=self.cfg["stt"]["model"],
+                    use_microphone=False,
+                    spinner=False,
+                    device=self.cfg["stt"].get("device", "cpu"),
+                    compute_type=self.cfg["stt"].get("compute_type", "int8"),
+                    sample_rate=int(self.cfg["stt"].get("sample_rate", 16000)),
+                    language="en",
+                    beam_size=1,
+                    faster_whisper_vad_filter=False,
+                    no_log_file=True,
+                )
+            except Exception as exc:
+                self._recorder_init_failed = True
+                self._recorder = None
+                print(f"STT recorder init failed once: {type(exc).__name__}: {exc}", flush=True)
+                return None
+
+        return self._recorder
+
+    def shutdown(self) -> None:
+        recorder = self._recorder
+        self._recorder = None
+        if recorder is not None:
+            recorder.shutdown()
 
     def next_turn_id(self) -> int:
         self.turn_counter += 1
@@ -333,9 +429,13 @@ class VoicePipelineServer:
         samples = (np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0).copy()
         try:
             async with self.stt_lock:
-                self.recorder.feed_audio(samples, original_sample_rate=sample_rate)
-                text = await asyncio.to_thread(self.recorder.perform_final_transcription, samples, True)
-                self.recorder.clear_audio_queue()
+                recorder = self.recorder
+                if recorder is None:
+                    text = ""
+                else:
+                    recorder.feed_audio(samples, original_sample_rate=sample_rate)
+                    text = await asyncio.to_thread(recorder.perform_final_transcription, samples, True)
+                    recorder.clear_audio_queue()
         except Exception as exc:
             # near-silent audio can make whisper raise ("No clip timestamps found");
             # treat as empty transcript instead of failing the turn
@@ -434,45 +534,95 @@ class VoicePipelineServer:
 
     # ------------------------------------------------------------------ TTS
 
+
     def tts_chunks_sync(self, text: str, timing: TurnTiming) -> Iterator[bytes]:
-        voice = self.cfg["voice"]
-        key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_API_KEY") or os.environ.get("XI_API_KEY")
-        if not key:
-            raise RuntimeError("ElevenLabs API key not found")
-        timing.tts_model = voice["model"]
-        timing.voice_id = voice["voice_id"]
+        import shutil
+        import subprocess
+        import tempfile
+
+        voice = self.cfg.get("voice") or {}
+        provider = str(voice.get("provider") or "macos").strip().lower()
+
+        timing.tts_model = "macos-say"
+        timing.voice_id = str(voice.get("macos_voice") or "system-default")
         timing.tts_request_start_monotonic = timing.tts_request_start_monotonic or time.perf_counter()
         record_usage(tts_chars=len(text))
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice['voice_id']}/stream"
-        params = {"output_format": voice.get("output_format", "pcm_16000")}
-        payload = {
-            "text": text,
-            "model_id": voice["model"],
-            "voice_settings": {
-                "stability": 0.55, "similarity_boost": 0.70,
-                "style": 0.10, "use_speaker_boost": True,
-            },
-        }
-        response = requests.post(
-            url, params=params,
-            headers={"xi-api-key": key, "Accept": "application/octet-stream", "Content-Type": "application/json"},
-            json=payload, stream=True, timeout=120,
-        )
-        if response.status_code >= 400:
-            response.close()
-            raise RuntimeError(f"ElevenLabs HTTP {response.status_code}: {response.text[:1000]}")
+
+        if provider not in ("macos", "macos-say", "say", "local"):
+            timing.errors.append(f"unsupported_local_tts_provider:{provider}")
+            return
+
+        say_bin = shutil.which("say") or "/usr/bin/say"
+        ffmpeg_bin = shutil.which("ffmpeg")
+
+        if not ffmpeg_bin:
+            timing.errors.append("local_tts_ffmpeg_missing")
+            return
+
+        tmp_name = None
+
         try:
-            for chunk in response.iter_content(chunk_size=4096):
+            with tempfile.NamedTemporaryFile(suffix=".aiff", delete=False) as tmp:
+                tmp_name = tmp.name
+
+            cmd = [say_bin]
+            macos_voice = str(voice.get("macos_voice") or "").strip()
+            if macos_voice:
+                cmd += ["-v", macos_voice]
+            cmd += ["-o", tmp_name, text]
+
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=120,
+            )
+
+            proc = subprocess.Popen(
+                [
+                    ffmpeg_bin,
+                    "-nostdin",
+                    "-loglevel", "error",
+                    "-i", tmp_name,
+                    "-f", "s16le",
+                    "-acodec", "pcm_s16le",
+                    "-ac", "1",
+                    "-ar", "16000",
+                    "pipe:1",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            sent = False
+
+            while True:
+                chunk = proc.stdout.read(4096)
                 if not chunk:
-                    continue
-                if timing.first_tts_audio_byte_monotonic is None:
+                    break
+                if not sent:
                     timing.first_tts_audio_byte_monotonic = time.perf_counter()
+                    sent = True
                 yield chunk
+
+            stderr = proc.stderr.read().decode("utf-8", "ignore")
+            rc = proc.wait(timeout=120)
+
+            if rc != 0:
+                timing.errors.append(f"local_tts_ffmpeg_exit:{rc}:{stderr[:200]}")
+
+        except Exception as exc:
+            timing.errors.append(f"local_tts_error:{type(exc).__name__}:{exc}")
+            print(f"Local TTS nonfatal error: {type(exc).__name__}: {exc}", flush=True)
+            return
+
         finally:
-            response.close()  # barge-in cancels mid-stream; don't leak the connection
-
-    # ------------------------------------------------------------- Turn flow
-
+            if tmp_name:
+                try:
+                    Path(tmp_name).unlink()
+                except OSError:
+                    pass
     async def stream_response_audio(
         self, ws: WebSocket, transcript: str, timing: TurnTiming, conn: "ConnState",
     ) -> None:
@@ -648,11 +798,34 @@ def get_pipeline() -> VoicePipelineServer:
 app = FastAPI(title="Hermes Voice Pipeline")
 
 
+
+@app.get("/health")
+async def zod_health():
+    cfg = load_config()
+    hermes_cfg = cfg.get("hermes") or {}
+    base = str(hermes_cfg.get("base_url") or "http://127.0.0.1:8642").rstrip("/")
+    online = False
+    try:
+        response = requests.get(base + "/health", timeout=3)
+        online = response.status_code == 200
+    except Exception:
+        online = False
+
+    return {
+        "status": "ok" if online else "degraded",
+        "service": "zod-hud",
+        "hermes": "online" if online else "offline",
+        "model": hermes_cfg.get("model"),
+        "provider": hermes_cfg.get("provider"),
+    }
 @app.on_event("startup")
 async def warm_pipeline() -> None:
     """Warm the local Whisper fallback in the BACKGROUND, exactly once (this
     hook fires once per uvicorn listener — there are four), and never let a
     warm failure take a listener down."""
+    if not (CFG.get("stt") or {}).get("warm_on_startup", True):
+        print("STT startup warm disabled; lazy initialization enabled.", flush=True)
+        return
     global _WARM_STARTED
     if _WARM_STARTED:
         return
@@ -669,6 +842,17 @@ async def warm_pipeline() -> None:
 
 
 _WARM_STARTED = False
+
+
+@app.on_event("shutdown")
+async def shutdown_pipeline() -> None:
+    pipeline = PIPELINE
+    if pipeline is None or pipeline._recorder is None:
+        return
+    try:
+        await asyncio.to_thread(pipeline.shutdown)
+    except Exception as exc:
+        print(f"STT recorder shutdown failed: {type(exc).__name__}: {exc}", flush=True)
 
 
 # ------------------------------------------------------------------ Auth
@@ -1207,6 +1391,9 @@ def main() -> int:
     server = CFG["server"]
     host = server.get("host", "0.0.0.0")
     port = int(server.get("port", 8765))
+    # Fix localhost specifically to be 127.0.0.1
+    if host == "localhost":
+        host = "127.0.0.1"
     tls_ports = server.get("tls_ports") or ([server["tls_port"]] if server.get("tls_port") else [])
     cert = server.get("tls_cert")
     key = server.get("tls_key")

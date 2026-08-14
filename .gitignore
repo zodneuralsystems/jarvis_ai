@@ -1,11 +1,17 @@
 # secrets & local state — never commit
 .env
 *.env
-server/config/server.yaml
+server/.env*
+HUD_TOKEN*
 server/certs/
 server/logs/
 server/hud/audio/
 server/hud/jarvis.cer
+
+# Local recovery copies stay available but must never be staged accidentally.
+server/config/server.yaml.*
+server/server.py.*
+server/hud/index.html.*
 
 # worker local files
 worker/run-stt.bat

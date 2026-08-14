@@ -1,0 +1,64 @@
+llm:
+  provider: hermes
+  model: zod-qwen3-coder:30b
+  api_key_env: ANTHROPIC_API_KEY
+  max_tokens: 220
+  temperature: 0.3
+  history_turns: 12
+hermes:
+  base_url: http://127.0.0.1:8642
+  api_key_env: API_SERVER_KEY
+  conversation: zod-hud-main
+  session_key: zod:user:main
+  timeout: 240
+  ack_after_seconds: 0
+  ack_texts:
+  - On it.
+  - Still working.
+  - Almost there.
+  fallback_provider: null
+  instructions: 'You are speaking aloud through a voice pipeline. Replies are converted
+    to speech, so use plain conversational prose only: no markdown, no lists, no code
+    blocks. Default to one to three short sentences unless asked for more detail.
+    Speak numbers, dates, times and phone numbers as natural spoken words. Never speak
+    secrets, API keys, or passwords aloud.
+
+    '
+  model: zod-qwen3-coder:30b
+  provider: custom
+stt:
+  model: small.en
+  device: cpu
+  compute_type: int8
+  sample_rate: 16000
+  partials: true
+  partial_interval: 1.2
+  warm_on_startup: false
+machines:
+- name: GPU WORKER
+  host: 192.168.1.50
+  stats_url: http://192.168.1.50:8767/stats
+  ping_port: 445
+usage:
+  llm_cost_per_mtok_input: 0
+  llm_cost_per_mtok_output: 0
+server:
+  host: 127.0.0.1
+  port: 8765
+  tls_ports: []
+  tls_cert: certs/cert.pem
+  tls_key: certs/key.pem
+  dashboard_proxy:
+    port: 9443
+    target: http://127.0.0.1:9119
+security:
+  hud_token_env: JARVIS_HUD_TOKEN
+  extra_origin_hosts: []
+voice:
+  provider: macos
+  macos_voice: ''
+persona:
+  system_prompt: 'You are the spoken interface for the user''s personal agent. Be
+    direct, calm, and concise. Default to one to three short sentences.
+
+    '

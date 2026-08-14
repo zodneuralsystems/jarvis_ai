@@ -52,6 +52,8 @@ LOG_PATH = ROOT / "logs" / "latency.jsonl"
 STATE_PATH = ROOT / "logs" / "hermes_sessions.json"
 USAGE_PATH = ROOT / "logs" / "usage_stats.json"
 _USAGE_LOCK = threading.Lock()
+_RUNTIME_STATUS_LOCK = threading.Lock()
+_LAST_HERMES_RUNTIME: dict = {}
 
 
 def _today() -> str:
@@ -327,8 +329,23 @@ class HermesAPI:
                 continue
             ev = event_name or data.get("event", "")
             runtime = data.get("runtime")
-            if runtime and ev in ("run.started", "assistant.completed"):
-                print(f"Hermes {ev} runtime {json.dumps(runtime, sort_keys=True)}", flush=True)
+            if isinstance(runtime, dict):
+                requested = runtime.get("requested") if isinstance(runtime.get("requested"), dict) else {}
+                safe_runtime = {
+                    "provider": str(runtime.get("provider") or ""),
+                    "model": str(runtime.get("model") or ""),
+                    "model_lock": str(runtime.get("model_lock") or ""),
+                    "requested": {
+                        "provider": str(requested.get("provider") or ""),
+                        "model": str(requested.get("model") or ""),
+                    },
+                }
+                if ev in ("run.started", "assistant.completed"):
+                    print(f"Hermes {ev} runtime {json.dumps(safe_runtime, sort_keys=True)}", flush=True)
+                if ev == "assistant.completed" and safe_runtime["model_lock"] == "confirmed":
+                    with _RUNTIME_STATUS_LOCK:
+                        _LAST_HERMES_RUNTIME.clear()
+                        _LAST_HERMES_RUNTIME.update(safe_runtime)
             if ev == "run.started":
                 yield ("run", data.get("run_id") or "")
             elif ev == "assistant.delta":
@@ -382,6 +399,7 @@ class VoicePipelineServer:
 
         if self._recorder is None:
             try:
+                initial_prompt = str(self.cfg["stt"].get("initial_prompt") or "").strip()
                 self._recorder = AudioToTextRecorder(
                     model=self.cfg["stt"]["model"],
                     use_microphone=False,
@@ -391,6 +409,7 @@ class VoicePipelineServer:
                     sample_rate=int(self.cfg["stt"].get("sample_rate", 16000)),
                     language="en",
                     beam_size=1,
+                    initial_prompt=initial_prompt or None,
                     faster_whisper_vad_filter=False,
                     no_log_file=True,
                 )
@@ -512,8 +531,8 @@ class VoicePipelineServer:
     def _hermes_turn(
         self, session_id: str, transcript: str, timing: TurnTiming, h: dict, conversation: str,
     ) -> Iterator[tuple[str, str]]:
-        timing.llm_provider = "hermes"
-        timing.llm_model = "hermes-agent"
+        timing.llm_provider = str(h.get("provider") or "hermes")
+        timing.llm_model = str(h.get("model") or "hermes-agent")
         timeout = float(h.get("timeout", 240))
         try:
             it = self.hermes.chat_stream_events(session_id, transcript, timeout)
@@ -677,6 +696,8 @@ class VoicePipelineServer:
                     clean = self._clean_for_tts(sentence)
                     if not clean:
                         continue
+                    if conn.spoken_sentences and clean == conn.spoken_sentences[-1]:
+                        continue
                     if timing.first_sentence_monotonic is None:
                         timing.first_sentence_monotonic = time.perf_counter()
                     if not spoken:
@@ -684,14 +705,14 @@ class VoicePipelineServer:
                         spoken = True
                     conn.spoken_sentences.append(clean)
                     await self._send_tts_sentence(ws, clean, timing)
-            tail = self._clean_for_tts(pending.strip())
-            if tail:
+            tail = self._clean_for_tts(self._dedupe_exact_repeat(pending))
+            if tail and (not conn.spoken_sentences or tail != conn.spoken_sentences[-1]):
                 conn.spoken_sentences.append(tail)
                 await self._send_tts_sentence(ws, tail, timing)
         finally:
             if not forward_task.done():
                 forward_task.cancel()
-        timing.response_text = "".join(full_response).strip()
+        timing.response_text = self._dedupe_exact_repeat("".join(full_response))
 
     async def _async_llm_events(
         self, transcript: str, timing: TurnTiming, conversation: str,
@@ -749,6 +770,24 @@ class VoicePipelineServer:
             sentences.append(match.group(1).strip())
             last_end = match.end()
         return sentences, text[last_end:]
+
+    @staticmethod
+    def _dedupe_exact_repeat(text: str) -> str:
+        """Collapse a response that is exactly repeated by the upstream model."""
+        text = text.strip()
+        if not text:
+            return ""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if len(lines) > 1 and len(lines) % 2 == 0:
+            half = len(lines) // 2
+            if lines[:half] == lines[half:]:
+                return "\n".join(lines[:half])
+        words = text.split()
+        if len(words) >= 4 and len(words) % 2 == 0:
+            half = len(words) // 2
+            if words[:half] == words[half:]:
+                return " ".join(words[:half])
+        return text
 
     @staticmethod
     def _clean_for_tts(text: str) -> str:
@@ -980,12 +1019,9 @@ async def hud_chat(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=502)
 
 
-_ELEVEN_CACHE: dict = {"ts": 0.0, "data": None}
-
-
 @app.get("/api/usage")
 async def usage() -> JSONResponse:
-    """LLM token usage (local tally) + ElevenLabs subscription quota."""
+    """Local token and local TTS character usage."""
     u = read_usage()
     cost_cfg = CFG.get("usage") or {}
     cin = float(cost_cfg.get("llm_cost_per_mtok_input", 0) or 0)
@@ -1001,44 +1037,39 @@ async def usage() -> JSONResponse:
             "today": u["today"], "total": u["total"],
             "today_cost": est(u["today"]), "total_cost": est(u["total"]),
         },
-        "elevenlabs": None,
+        "tts": {
+            "today_chars": int(u["today"].get("tts_chars") or 0),
+            "total_chars": int(u["total"].get("tts_chars") or 0),
+        },
     }
-    # ElevenLabs subscription — NEVER blocks the response: serve the cache and
-    # refresh it in the background when stale.
-    now = time.time()
-    if (_ELEVEN_CACHE["data"] is None or now - _ELEVEN_CACHE["ts"] > 300) and not _ELEVEN_CACHE.get("refreshing"):
-        key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_API_KEY") or os.environ.get("XI_API_KEY")
-        if key:
-            _ELEVEN_CACHE["refreshing"] = True
-
-            def fetch() -> dict | None:
-                try:
-                    r = requests.get("https://api.elevenlabs.io/v1/user/subscription",
-                                     headers={"xi-api-key": key}, timeout=10)
-                    if r.ok:
-                        j = r.json()
-                        return {
-                            "used": j.get("character_count"),
-                            "limit": j.get("character_limit"),
-                            "remaining": (j.get("character_limit") or 0) - (j.get("character_count") or 0),
-                            "tier": j.get("tier"),
-                            "resets_unix": j.get("next_character_count_reset_unix"),
-                        }
-                except Exception:
-                    pass
-                return None
-
-            async def refresh() -> None:
-                try:
-                    data = await asyncio.to_thread(fetch)
-                    if data is not None:
-                        _ELEVEN_CACHE.update(ts=time.time(), data=data)
-                finally:
-                    _ELEVEN_CACHE["refreshing"] = False
-
-            asyncio.get_running_loop().create_task(refresh())
-    out["elevenlabs"] = _ELEVEN_CACHE["data"]
     return JSONResponse(out)
+
+
+@app.get("/api/loadout")
+async def loadout() -> JSONResponse:
+    """Safe effective runtime values for the HUD Models Loadout."""
+    hermes_cfg = CFG.get("hermes") or {}
+    stt_cfg = CFG.get("stt") or {}
+    voice_cfg = CFG.get("voice") or {}
+    model = str(hermes_cfg.get("model") or "Unavailable")
+    provider = str(hermes_cfg.get("provider") or "Unavailable")
+    fallback = hermes_cfg.get("fallback_provider")
+    voice_provider = str(voice_cfg.get("provider") or "").strip().lower()
+    with _RUNTIME_STATUS_LOCK:
+        runtime = dict(_LAST_HERMES_RUNTIME)
+    lock_confirmed = (
+        runtime.get("model_lock") == "confirmed"
+        and runtime.get("model") == model
+        and runtime.get("provider") == provider
+    )
+    return JSONResponse({
+        "brain": model,
+        "provider": provider,
+        "stt": str(stt_cfg.get("model") or "Unavailable"),
+        "tts": "macOS Local" if voice_provider in ("macos", "macos-say", "say", "local") else "Unavailable",
+        "fallback": "None" if fallback is None else str(fallback),
+        "model_lock": "confirmed" if lock_confirmed else "requested",
+    })
 
 
 WS_CLIENTS: set = set()

@@ -33,6 +33,7 @@ stt:
   sample_rate: 16000
   partials: true
   partial_interval: 1.2
+  initial_prompt: Zod
   warm_on_startup: false
 machines:
 - name: GPU WORKER

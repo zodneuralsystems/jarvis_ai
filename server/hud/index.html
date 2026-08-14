@@ -307,16 +307,17 @@ footer{
   <!-- RIGHT COLUMN -->
   <div class="col">
     <div class="panel"><h2><span>MODELS LOADOUT</span><span class="num">06</span></h2>
-      <div class="kv"><span>Brain</span><b>hermes-agent</b></div>
-      <div class="kv"><span>STT</span><b>whisper base.en</b></div>
-      <div class="kv"><span>TTS</span><b>ElevenLabs Flash v2.5</b></div>
-      <div class="kv"><span>Fallback</span><b>claude-haiku-4-5</b></div>
+      <div class="kv"><span>Brain</span><b id="loadBrain">—</b></div>
+      <div class="kv"><span>Provider</span><b id="loadProvider">—</b></div>
+      <div class="kv"><span>STT</span><b id="loadStt">—</b></div>
+      <div class="kv"><span>TTS</span><b id="loadTts">—</b></div>
+      <div class="kv"><span>Fallback</span><b id="loadFallback">—</b></div>
+      <div class="kv"><span>Model lock</span><b id="loadModelLock">—</b></div>
       <div style="border-top:1px solid var(--line); margin:6px 0 4px"></div>
       <div class="kv"><span>Tokens today</span><b id="uTok">—</b></div>
       <div class="kv" id="uCostRow" style="display:none"><span>Est. cost today</span><b id="uCost">—</b></div>
       <div class="kv"><span>Turns today</span><b id="uTurns">—</b></div>
-      <div class="kv"><span>11Labs quota</span><b id="uTts">—</b></div>
-      <div class="bar"><i id="ttsBar"></i></div>
+      <div class="kv"><span>TTS chars today</span><b id="uTts">—</b></div>
     </div>
     <div class="panel"><h2><span>MACHINES</span><span class="num">07</span></h2>
       <div id="machinesList"><div class="kv"><span>loading…</span></div></div>
@@ -505,10 +506,11 @@ function connect(){
       currentRun=null; showStop(false);
       const tm=e.timing||{};
       turns++; $("mTurns").textContent=turns;
-      if(tm.end_of_speech_to_first_audio_seconds!=null)$("mFirst").textContent=tm.end_of_speech_to_first_audio_seconds+"s";
-      if(tm.total_turn_seconds!=null)$("mTotal").textContent=tm.total_turn_seconds+"s";
-      $("mBrain").textContent=tm.llm_provider||"—";
-      if(tm.response_text)addMsg("jarvis",tm.response_text);
+       if(tm.end_of_speech_to_first_audio_seconds!=null)$("mFirst").textContent=tm.end_of_speech_to_first_audio_seconds+"s";
+       if(tm.total_turn_seconds!=null)$("mTotal").textContent=tm.total_turn_seconds+"s";
+       $("mBrain").textContent=tm.llm_model||tm.llm_provider||"—";
+       if(tm.response_text)addMsg("jarvis",tm.response_text);
+       refreshLoadout();
       setTimeout(()=>{if(state!=="listening")setState("standby","STANDBY")},400);
     }
   };
@@ -648,6 +650,7 @@ async function sendChat(){
     if(!r.ok)throw new Error(j.error||r.status);
     (j.tools||[]).forEach(t=>addActivity("",t.name,t.preview));
     addMsg("jarvis",j.text||"(no reply)");
+    refreshLoadout();
     if(/^\/(new|reset|clear)\b/i.test(text)){     // slash reset → also clear the visible feed
       setTimeout(()=>{feed.innerHTML="";addMsg("sys","conversation reset");},800);
     }
@@ -703,6 +706,18 @@ async function refreshMachines(){
   }catch{ $("machinesList").innerHTML="<div class='kv'><span>unavailable</span></div>"; }
 }
 const fmtK=n=>n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(1)+"k":String(n||0);
+async function refreshLoadout(){
+  try{
+    const r=await fetch("/api/loadout"); if(!r.ok)throw new Error(r.status);
+    const j=await r.json();
+    $("loadBrain").textContent=j.brain||"—";
+    $("loadProvider").textContent=j.provider||"—";
+    $("loadStt").textContent=j.stt||"—";
+    $("loadTts").textContent=j.tts||"—";
+    $("loadFallback").textContent=j.fallback||"—";
+    $("loadModelLock").textContent=j.model_lock||"—";
+  }catch{}
+}
 async function refreshUsage(){
   try{
     const r=await fetch("/api/usage"); const j=await r.json();
@@ -710,23 +725,14 @@ async function refreshUsage(){
     $("uTok").textContent=`${fmtK(t.llm_in||0)} in / ${fmtK(t.llm_out||0)} out`;
     $("uTurns").textContent=t.turns||0;
     if(j.llm?.today_cost!=null){$("uCostRow").style.display="flex";$("uCost").textContent="$"+j.llm.today_cost.toFixed(2)}
-    const e=j.elevenlabs;
-    if(e&&e.limit){
-      const pct=Math.round(e.used/e.limit*100);
-      $("uTts").textContent=`${fmtK(e.used)} / ${fmtK(e.limit)} (${100-pct}% left)`;
-      $("ttsBar").style.width=pct+"%";
-      $("uTts").className=pct>90?"err":pct>70?"warn":"";
-    }else{
-      // quota API unavailable (key needs user_read permission) → local tally
-      $("uTts").textContent=fmtK(t.tts_chars||0)+" chars today";
-      $("ttsBar").style.width="0%";
-    }
+    $("uTts").textContent=fmtK(j.tts?.today_chars||0)+" chars";
   }catch{}
 }
-refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();
+refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();refreshLoadout();
 setInterval(refreshUsage,60000);
 setInterval(refreshHealth,15000); setInterval(refreshJobs,60000); setInterval(refreshMachines,10000);
 setInterval(refreshSkills,120000);
+setInterval(refreshLoadout,30000);
 
 /* ====================== holographic media panels ==================== */
 function holoWhoosh(up=true){

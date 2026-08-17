@@ -27,3 +27,6 @@ venv/
 .DS_Store
 Thumbs.db
 nohup.out
+
+# Universe runtime state (self-seeds; machine-local ledger)
+server/universe_state/

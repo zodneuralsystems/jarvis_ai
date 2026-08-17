@@ -61,7 +61,20 @@ security:
   extra_origin_hosts: []
 voice:
   provider: macos
-  macos_voice: ''
+  # Zod's voice: male, deep, calm, and entirely local. Selected by measuring the
+  # voices actually installed on this Mac (median F0 on one identical sentence):
+  # Ralph 70Hz and Rocko 83Hz are deeper but are legacy formant / character
+  # voices that read as cartoonish; Daniel is 112.5Hz, unambiguously male, and a
+  # full-quality long-form voice that stays natural across a conversation.
+  # WARNING: Alex, Tom, Aaron, Evan, Oliver, Arthur and Gordon are NOT installed
+  # here. `say -v <name>` still exits 0 for them and silently falls back to the
+  # default female voice, so do not "fix" the voice by naming one of those.
+  # Applied only after the voice path was proven working end to end, never
+  # before — a working voice is not traded for a different character.
+  macos_voice: Daniel
+  # Optional words-per-minute for `say -r`. Empty keeps the voice's own pacing,
+  # which measured as the most fluent of the candidates.
+  macos_rate: ''
 persona:
   system_prompt: 'You are the spoken interface for the user''s personal agent. Be
     direct, calm, and concise. Default to one to three short sentences.

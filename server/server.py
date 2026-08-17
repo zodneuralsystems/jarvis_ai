@@ -208,6 +208,11 @@ class HermesAPI:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
 
+    # Hermes paginates /api/sessions and defaults to the newest 50. A named
+    # conversation that has fallen behind that many newer sessions must still be
+    # found by title, so every lookup asks for the full list explicitly.
+    _SESSION_LIST_LIMIT = 500
+
     def get_session_id(self, name: str, force_new: bool = False) -> str:
         state = self._load_state()
         sid = state.get(name)
@@ -238,6 +243,7 @@ class HermesAPI:
                 existing = requests.get(
                     f"{self.base}/api/sessions",
                     headers=self.headers(),
+                    params={"limit": self._SESSION_LIST_LIMIT},
                     timeout=15,
                 )
                 if existing.ok:
@@ -258,9 +264,18 @@ class HermesAPI:
                           json={"title": create_title}, timeout=15)
 
         if r.status_code == 400 and "invalid_title" in r.text:
+            # Hermes says the title is taken, so the session exists somewhere in
+            # the full list — not necessarily on the default (newest 50) page.
+            # Without an explicit limit this lookup re-reads the same page, finds
+            # nothing, and falls through to raise_for_status(), surfacing a bare
+            # "400 Bad Request for url: .../api/sessions" to the user. That is
+            # exactly how a long-lived conversation breaks once enough newer
+            # sessions exist, and it takes typed chat and voice down together
+            # because both resolve their session through here.
             existing = requests.get(
                 f"{self.base}/api/sessions",
                 headers=self.headers(),
+                params={"limit": self._SESSION_LIST_LIMIT},
                 timeout=15,
             )
             existing.raise_for_status()
@@ -724,6 +739,9 @@ class VoicePipelineServer:
             macos_voice = str(voice.get("macos_voice") or "").strip()
             if macos_voice:
                 cmd += ["-v", macos_voice]
+            macos_rate = str(voice.get("macos_rate") or "").strip()
+            if macos_rate.isdigit() and 80 <= int(macos_rate) <= 400:
+                cmd += ["-r", macos_rate]
             cmd += ["-o", tmp_name, text]
 
             subprocess.run(
@@ -2015,6 +2033,25 @@ async def root() -> RedirectResponse:
 
 if HUD_DIR.exists():
     app.mount("/hud", StaticFiles(directory=str(HUD_DIR), html=True), name="hud")
+
+
+# ------------------------------------------------------------ Zod's Universe
+# Strictly additive. /hud/ stays the accepted Operator and recovery interface
+# and "/" still redirects there. The Universe owns no conversation or voice
+# backend of its own: it drives the same /ws channel and the same /api/chat
+# operator turn the HUD does, so there is exactly one proven runtime.
+UNIVERSE_V2_DIR = ROOT / "universe-v2"
+try:
+    import universe_api
+
+    universe_api.configure(CFG)
+    app.include_router(universe_api.router)
+    if UNIVERSE_V2_DIR.exists():
+        app.mount("/universe-v2", StaticFiles(directory=str(UNIVERSE_V2_DIR), html=True),
+                  name="universe-v2")
+    print("Zod's Universe (v2) available on /universe-v2/", flush=True)
+except Exception as exc:  # the Universe must never take the Operator down
+    print(f"Universe interface unavailable: {type(exc).__name__}: {exc}", flush=True)
 
 
 # ----------------------------------------------- Hermes dashboard TLS proxy

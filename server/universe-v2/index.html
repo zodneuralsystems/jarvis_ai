@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zod's Universe</title>
+<style>
+:root{
+  --bg:#03070e; --panel:rgba(10,22,38,.74); --line:rgba(0,229,255,.16);
+  --txt:#dce9f7; --dim:#93abc6; --dim2:#5d7793;
+  --cyan:#00e5ff; --amber:#ffb300; --red:#ff5470; --green:#33d69f; --violet:#8b7dff;
+  --sans:system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--txt);font-family:var(--sans);font-size:14px;overflow:hidden;
+  -webkit-font-smoothing:antialiased}
+button,input{font-family:inherit;font-size:inherit;color:inherit}
+button{cursor:pointer;background:none;border:none}
+::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:#16304a;border-radius:5px}
+
+#sky{position:fixed;inset:0;z-index:0;background:
+  radial-gradient(1200px 780px at 50% 44%, rgba(0,229,255,.10) 0%, transparent 62%),
+  radial-gradient(800px 560px at 84% 80%, rgba(96,72,220,.13) 0%, transparent 66%),
+  radial-gradient(660px 460px at 12% 18%, rgba(0,180,255,.07) 0%, transparent 64%), var(--bg)}
+#stars{position:fixed;inset:0;z-index:0;opacity:.5}
+#app{position:relative;z-index:1;height:100vh;display:flex;flex-direction:column}
+
+/* -------------------------------------------------------------- top bar */
+#bar{height:54px;flex:0 0 auto;display:flex;align-items:center;gap:14px;padding:0 20px;
+  border-bottom:1px solid var(--line);backdrop-filter:blur(9px);background:rgba(4,10,18,.62)}
+#mark{display:flex;align-items:center;gap:10px}
+#mark b{letter-spacing:.2em;font-size:14px;font-weight:600}
+#mark span{color:var(--dim2);font-size:9.5px;letter-spacing:.22em}
+.spacer{flex:1}
+#modes{display:flex;gap:2px;border:1px solid var(--line);border-radius:9px;padding:2px;
+  background:rgba(8,18,32,.6)}
+#modes button{padding:6px 16px;border-radius:7px;font-size:11.5px;letter-spacing:.13em;color:var(--dim2)}
+#modes button.on{background:rgba(0,229,255,.13);color:var(--cyan)}
+.chip{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dim);
+  border:1px solid var(--line);border-radius:20px;padding:4px 10px;white-space:nowrap;
+  background:rgba(8,18,32,.6);text-decoration:none}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--dim2)}
+.dot.on{background:var(--green);box-shadow:0 0 7px rgba(51,214,159,.8)}
+.dot.warn{background:var(--amber)}.dot.off{background:var(--red)}
+
+/* --------------------------------------------------------------- stage  */
+#stage{flex:1;min-height:0;position:relative;display:flex;flex-direction:column;align-items:center}
+
+/* Level 1 — Zod */
+#zodview{flex:1;min-height:0;width:100%;display:flex;flex-direction:column;align-items:center;
+  justify-content:flex-start;padding:22px 20px 0}
+#coreWrap{position:relative;flex:0 0 auto}
+#core{width:112px;height:112px;border-radius:50%;
+  background:radial-gradient(circle at 50% 50%,#eafeff 0%,var(--cyan) 26%,#0a6f80 55%,transparent 72%);
+  box-shadow:0 0 58px rgba(0,229,255,.42),0 0 130px rgba(0,229,255,.15);
+  transition:transform .45s ease,box-shadow .45s ease}
+#core.think{transform:scale(1.06);box-shadow:0 0 82px rgba(0,229,255,.62),0 0 170px rgba(0,229,255,.26)}
+#core.listen{background:radial-gradient(circle at 50% 50%,#fff4e0 0%,var(--amber) 26%,#7a5400 55%,transparent 72%);
+  box-shadow:0 0 72px rgba(255,179,0,.5)}
+#ring{position:absolute;inset:-18px;border-radius:50%;border:1px solid rgba(0,229,255,.22)}
+#state{margin-top:15px;font-family:var(--mono);font-size:11px;letter-spacing:.2em;color:var(--dim);
+  text-transform:uppercase;min-height:15px;text-align:center}
+#feed{width:min(880px,100%);flex:1;min-height:0;overflow-y:auto;margin-top:16px;
+  display:flex;flex-direction:column;gap:11px;padding:4px 4px 10px}
+.msg{padding:11px 15px;border-radius:12px;font-size:15px;line-height:1.55;white-space:pre-wrap;
+  word-break:break-word;max-width:90%}
+.msg .who{display:block;font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--dim2);margin-bottom:4px}
+.msg.you{align-self:flex-end;background:rgba(18,48,72,.7);border:1px solid rgba(0,229,255,.18)}
+.msg.zod{align-self:flex-start;background:var(--panel);border:1px solid var(--line);
+  border-left:2px solid var(--cyan)}
+.msg.sys{align-self:center;background:none;border:1px dashed rgba(0,229,255,.18);
+  color:var(--dim2);font-family:var(--mono);font-size:11.5px}
+#partial{width:min(880px,100%);color:var(--dim2);font-style:italic;font-size:13px;min-height:18px;padding:0 6px}
+
+/* Level 2 — Universe map */
+#mapview{position:absolute;inset:0;display:none}
+#map{width:100%;height:100%;display:block}
+#legend{position:absolute;left:20px;bottom:18px;display:flex;gap:14px;flex-wrap:wrap;
+  font-size:10.5px;color:var(--dim2);font-family:var(--mono)}
+#legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+#summary{position:absolute;left:20px;top:18px;display:flex;gap:20px;font-size:12px;color:var(--dim)}
+#summary b{color:var(--txt);font-family:var(--mono);font-size:16px;display:block;font-weight:600}
+
+/* Level 3 — detail, an overlay that never replaces Zod */
+#detail{position:absolute;right:0;top:0;bottom:0;width:min(460px,46vw);z-index:6;
+  background:rgba(5,12,22,.95);border-left:1px solid var(--line);backdrop-filter:blur(14px);
+  transform:translateX(101%);transition:transform .26s ease;overflow-y:auto;padding:20px 22px 40px}
+#detail.open{transform:none}
+#detail h2{margin:0 0 3px;font-size:17px}
+#detail .kind{color:var(--dim2);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:14px}
+#detail .close{position:absolute;right:14px;top:12px;color:var(--dim2);font-size:18px}
+.row{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid rgba(0,229,255,.07)}
+.row:last-child{border-bottom:none}
+.k{color:var(--dim2);font-size:11.5px}
+.v{font-family:var(--mono);font-size:11.5px;text-align:right;word-break:break-word}
+.v.l{text-align:left}
+.tag{display:inline-flex;font-family:var(--mono);font-size:9.5px;letter-spacing:.07em;padding:2px 7px;
+  border-radius:4px;border:1px solid;white-space:nowrap}
+.t-active,.t-resident,.t-online,.t-completed,.t-routed{color:var(--green);border-color:#1d6b52;background:#0a2018}
+.t-available,.t-installed,.t-running{color:var(--cyan);border-color:#0a7c8c;background:#062229}
+.t-interface_only,.t-awaiting_approval,.t-degraded{color:var(--amber);border-color:#6b5312;background:#1f1806}
+.t-planned,.t-unrouted,.t-unknown,.t-not_yet_connected{color:var(--dim2);border-color:#1e3550;background:#0a1422}
+.t-blocked,.t-offline,.t-failed,.t-not_installed{color:var(--red);border-color:#6b2033;background:#200a11}
+.sec{margin-top:18px}
+.sec>h3{margin:0 0 8px;font-size:10.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--dim2)}
+.stages{display:flex;flex-wrap:wrap;gap:4px}
+.stage{font-family:var(--mono);font-size:9.5px;padding:2px 6px;border-radius:3px;
+  border:1px solid #1e3550;color:var(--dim2)}
+.stage.done{color:var(--green);border-color:#1d6b52}
+.stage.now{color:var(--cyan);border-color:#0a7c8c;background:#062229}
+.mini{background:rgba(10,22,38,.6);border:1px solid var(--line);border-radius:9px;padding:10px 12px;margin-bottom:8px}
+.mini .n{font-size:12.5px;margin-bottom:4px}
+.note{color:var(--dim2);font-size:11.5px;line-height:1.5;margin-top:8px}
+.empty{color:var(--dim2);font-size:12px;padding:12px;border:1px dashed #1e3550;border-radius:8px;text-align:center}
+
+/* ------------------------------------------------------------- command  */
+#dock{width:min(880px,100%);margin:0 auto;padding:10px 20px 20px;flex:0 0 auto;position:relative;z-index:7}
+#inputwrap{display:flex;align-items:center;gap:10px;background:rgba(8,18,32,.86);
+  border:1px solid var(--line);border-radius:14px;padding:6px 8px 6px 16px;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+#inputwrap:focus-within{border-color:rgba(0,229,255,.45);box-shadow:0 0 0 1px rgba(0,229,255,.2),0 8px 32px rgba(0,0,0,.4)}
+#say{flex:1;min-width:0;background:none;border:none;outline:none;height:40px;font-size:15px}
+#say::placeholder{color:var(--dim2)}
+.rbtn{width:40px;height:40px;border-radius:11px;border:1px solid var(--line);display:flex;
+  align-items:center;justify-content:center;color:var(--dim);flex:0 0 auto;font-size:15px}
+.rbtn:hover{color:var(--txt);border-color:rgba(0,229,255,.4)}
+.rbtn.live{background:var(--amber);border-color:var(--amber);color:#1a1200}
+#lvl{height:2px;background:rgba(0,229,255,.12);border-radius:2px;margin-top:8px;overflow:hidden}
+#lvlBar{height:100%;width:0;background:var(--cyan);transition:width .07s linear}
+
+/* ------------------------------------------------------------ approvals */
+#appr{position:fixed;right:20px;bottom:96px;width:390px;max-height:62vh;overflow-y:auto;z-index:8}
+.card{border:1px solid rgba(255,179,0,.45);background:rgba(24,17,3,.96);border-radius:12px;padding:14px;
+  margin-top:10px;backdrop-filter:blur(8px);box-shadow:0 10px 40px rgba(0,0,0,.55)}
+.card .h{color:var(--amber);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:9px}
+.card .act{font-family:var(--mono);font-size:11.5px;background:rgba(0,0,0,.4);border:1px solid var(--line);
+  border-radius:7px;padding:9px;word-break:break-all;max-height:120px;overflow-y:auto;margin-bottom:9px}
+.card .why{color:var(--dim);font-size:12px;margin-bottom:10px}
+.btns{display:flex;gap:8px}
+.btn{flex:1;padding:9px;border-radius:9px;border:1px solid var(--line);font-size:12.5px;background:rgba(10,22,38,.8)}
+.btn.ok{background:var(--cyan);border-color:var(--cyan);color:#04121a;font-weight:600}
+.btn.no{color:var(--red);border-color:rgba(255,84,112,.5)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.st{margin-top:9px;font-family:var(--mono);font-size:10.5px;color:var(--dim)}
+
+#gate{position:fixed;inset:0;background:rgba(3,7,14,.97);display:none;align-items:center;
+  justify-content:center;z-index:50}
+#gate .box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px;
+  width:350px;text-align:center;backdrop-filter:blur(10px)}
+#gate input{width:100%;margin:16px 0 10px;padding:11px;border-radius:9px;border:1px solid var(--line);
+  background:rgba(0,0,0,.35);outline:none;text-align:center;font-family:var(--mono)}
+</style>
+</head>
+<body>
+<div id="sky"></div><canvas id="stars"></canvas>
+
+<div id="app">
+  <div id="bar">
+    <div id="mark">
+      <div style="width:16px;height:16px;border-radius:50%;
+        background:radial-gradient(circle,#eafeff 0%,var(--cyan) 40%,transparent 72%);
+        box-shadow:0 0 12px rgba(0,229,255,.6)"></div>
+      <div><b>ZOD</b> <span>UNIVERSE</span></div>
+    </div>
+    <div id="modes">
+      <button data-m="zod" class="on">ZOD</button>
+      <button data-m="map">UNIVERSE</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="chip"><span class="dot" id="dLink"></span><span id="sLink">link</span></div>
+    <div class="chip"><span class="dot" id="dBrain"></span><span id="sBrain">brain</span></div>
+    <a class="chip" href="/hud/" target="_blank">Operator HUD ↗</a>
+  </div>
+
+  <div id="stage">
+    <div id="zodview">
+      <div id="coreWrap"><div id="ring"></div><div id="core"></div></div>
+      <div id="state">standby</div>
+      <div id="feed"></div>
+      <div id="partial"></div>
+    </div>
+
+    <div id="mapview">
+      <canvas id="map"></canvas>
+      <div id="summary"></div>
+      <div id="legend">
+        <span><i style="background:var(--green)"></i>active</span>
+        <span><i style="background:var(--cyan)"></i>available</span>
+        <span><i style="background:var(--amber)"></i>interface only</span>
+        <span><i style="background:#3c556f"></i>planned</span>
+      </div>
+    </div>
+
+    <div id="detail"><button class="close" id="dClose">✕</button><div id="dBody"></div></div>
+  </div>
+
+  <div id="dock">
+    <div id="inputwrap">
+      <input id="say" placeholder="Talk to Zod…" autocomplete="off">
+      <button class="rbtn" id="mic" title="Voice (Space)">🎙</button>
+      <button class="rbtn" id="stop" title="Stop">■</button>
+    </div>
+    <div id="lvl"><div id="lvlBar"></div></div>
+  </div>
+</div>
+
+<div id="appr"></div>
+
+<div id="gate"><div class="box">
+  <div style="width:34px;height:34px;border-radius:50%;margin:0 auto 14px;
+    background:radial-gradient(circle,#eafeff 0%,var(--cyan) 40%,transparent 72%)"></div>
+  <div style="letter-spacing:.12em;font-size:12px;color:var(--dim)">ZOD UNIVERSE</div>
+  <input id="gi" type="password" placeholder="access token">
+  <button class="btn ok" id="gb" style="width:100%">ENTER</button>
+  <div id="gm" style="color:var(--red);font-size:11px;margin-top:10px;min-height:14px"></div>
+</div></div>
+
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const tag=s=>`<span class="tag t-${String(s??"unknown").toLowerCase()}">${esc(s??"UNKNOWN")}</span>`;
+
+/* One Zod. Deliberately the SAME conversation the Operator HUD uses, so moving
+   between /hud/ and the Universe continues one session instead of forking a
+   second Zod. */
+const CONV="jarvis-main";
+
+let ws=null,wsReady=false,operatorChannel=null,operatorRun=null,busy=false;
+let audioCtx=null,playhead=0,activeSources=[],leftoverByte=null;
+let mediaStream=null,srcNode=null,workletNode=null,workletReady=false,capturing=false;
+const pending=new Map();
+let data={},mode="zod",nodes=[],hover=null;
+
+/* ------------------------------------------------------------- starfield */
+(function(){
+  const c=$("stars"),x=c.getContext("2d");
+  function draw(){
+    c.width=innerWidth;c.height=innerHeight;x.clearRect(0,0,c.width,c.height);
+    for(let i=0;i<230;i++){
+      x.fillStyle=`rgba(190,235,255,${Math.random()*.55+.12})`;
+      x.beginPath();x.arc(Math.random()*c.width,Math.random()*c.height,Math.random()*1.25+.25,0,7);x.fill();
+    }
+  }
+  draw();addEventListener("resize",draw);   // drawn once per resize, no animation loop
+})();
+
+/* ----------------------------------------------------------------- state */
+function setState(t,cls){$("state").textContent=t;$("core").className=cls||""}
+function addMsg(who,text){
+  const d=document.createElement("div");d.className="msg "+who;
+  d.innerHTML=`<span class="who">${who==="you"?"Nick":who==="zod"?"Zod":"system"}</span>${esc(text)}`;
+  $("feed").appendChild(d);$("feed").scrollTop=$("feed").scrollHeight;
+}
+function showGate(){$("gate").style.display="flex";$("gi").focus()}
+$("gb").onclick=async()=>{
+  const v=$("gi").value.trim();if(!v)return;
+  // No `secure` flag: this origin is plain http on localhost, where a Secure
+  // cookie is silently dropped — the failure that once left /ws rejecting forever.
+  document.cookie=`jarvis_token=${encodeURIComponent(v)}; path=/; max-age=31536000; samesite=lax`;
+  const r=await fetch("/api/universe/overview");
+  if(r.status===401){$("gm").textContent="ACCESS DENIED";$("gi").value="";return}
+  location.reload();
+};
+$("gi").addEventListener("keydown",e=>{if(e.key==="Enter")$("gb").click()});
+
+/* ------------------------------------------------------------- approvals */
+function renderApproval(e){
+  const token=typeof e.approval_token==="string"?e.approval_token:"";
+  if(!token||pending.has(token))return;
+  const s=e.summary||{};
+  const el=document.createElement("div");el.className="card";
+  el.innerHTML=`<div class="h">⚠ Approval required ${e.strict?"· strict":"· non-strict"}</div>
+    <div class="act">${esc(s.action||"(no action supplied)")}</div>
+    <div class="why">${esc(s.reason||"")}</div>
+    <div class="btns"><button class="btn ok" data-d="once" ${e.can_approve_once?"":"disabled"}>APPROVE ONCE</button>
+    <button class="btn no" data-d="deny">DENY</button></div><div class="st"></div>`;
+  const st=el.querySelector(".st");
+  if(!e.can_approve_once)st.textContent="not a strict run — deny only";
+  el.querySelectorAll("button[data-d]").forEach(b=>b.onclick=()=>{
+    el.querySelectorAll("button").forEach(x=>x.disabled=true);
+    st.textContent="sending decision…";
+    // Server-authoritative: the browser only relays an opaque token.
+    ws.send(JSON.stringify({type:"approval_decision",approval_token:token,decision:b.dataset.d}));
+  });
+  pending.set(token,{el,st});$("appr").appendChild(el);
+}
+function apprState(t,m){const r=pending.get(t);if(r)r.st.textContent=m}
+function clearApprovals(m){
+  pending.forEach(r=>{r.st.textContent=m;r.el.querySelectorAll("button").forEach(b=>b.disabled=true)});
+  setTimeout(()=>{pending.forEach(r=>r.el.remove());pending.clear()},2500);
+}
+
+/* ------------------------------------------------------------- websocket */
+/* The Operator channel, unchanged: /ws -> operator_ready -> channel_id. */
+function connect(){
+  ws=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws");
+  ws.binaryType="arraybuffer";
+  ws.onopen=()=>{wsReady=true;$("dLink").className="dot on";$("sLink").textContent="linked"};
+  ws.onclose=()=>{
+    wsReady=false;operatorChannel=null;operatorRun=null;busy=false;capturing=false;
+    $("dLink").className="dot off";$("sLink").textContent="offline";
+    setState("link down");clearApprovals("CONNECTION LOST — NOT APPROVED");
+    setTimeout(connect,3000);
+  };
+  ws.onerror=()=>{};
+  ws.onmessage=ev=>{
+    if(ev.data instanceof ArrayBuffer){playChunk(ev.data);return}
+    let e;try{e=JSON.parse(ev.data)}catch{return}
+    switch(e.type){
+      case "operator_ready": operatorChannel=e.channel_id; setState("standby"); break;
+      case "partial_transcript": $("partial").textContent=e.text||""; break;
+      case "transcript": $("partial").textContent=""; if(e.text)addMsg("you",e.text); break;
+      case "operator_run_started": operatorRun=e.run_id; setState("working","think"); break;
+      case "approval_request": renderApproval(e); setState("awaiting your approval","think"); break;
+      case "approval_decision_sent": apprState(e.approval_token,
+        (e.decision==="once"?"APPROVE ONCE accepted":"DENY accepted")+" — waiting for Hermes"); break;
+      case "approval_resolved": apprState(e.approval_token,
+        e.state==="approved_once"?"APPROVED ONCE — executing":"DENIED — nothing executed"); break;
+      case "approval_expired": apprState(e.approval_token,e.message||"EXPIRED"); break;
+      case "approval_rejected": apprState(e.approval_token,e.message||"REJECTED"); break;
+      case "operator_run_stopping": addMsg("sys","run stopping: "+(e.error||"fail closed")); break;
+      case "operator_run_terminal":
+        operatorRun=null;setState("standby");
+        if(e.state&&e.state!=="completed")addMsg("sys","run "+e.state);
+        refresh(); break;
+      case "agent_status":
+        if(e.state==="tool_use")setState("tool: "+(e.tool||"tool"),"think");
+        else if(e.state==="speaking")setState("speaking","think");
+        else if(e.state==="stopped"){setState("stopped");addMsg("sys","run stopped")}
+        break;
+      case "error": $("partial").textContent="";addMsg("sys","error: "+e.message);setState("standby"); break;
+      case "done":
+        // Spoken turn: audio already played; render the text exactly once.
+        if(e.timing&&e.timing.response_text)addMsg("zod",e.timing.response_text);
+        setState("standby"); break;
+    }
+  };
+}
+
+/* ------------------------------------------------- audio out (HUD-proven) */
+function ensureCtx(){
+  if(!audioCtx){
+    try{audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000})}
+    catch{audioCtx=new (window.AudioContext||window.webkitAudioContext)()}
+  }
+  if(audioCtx.state==="suspended")audioCtx.resume();
+}
+function playChunk(buf){
+  ensureCtx();
+  let bytes=new Uint8Array(buf);
+  if(leftoverByte!==null){const m=new Uint8Array(bytes.length+1);m[0]=leftoverByte;m.set(bytes,1);bytes=m;leftoverByte=null}
+  if(bytes.length%2===1){leftoverByte=bytes[bytes.length-1];bytes=bytes.subarray(0,bytes.length-1)}
+  if(!bytes.length)return;
+  const i16=new Int16Array(bytes.buffer,bytes.byteOffset,bytes.length/2);
+  const f32=new Float32Array(i16.length);
+  for(let i=0;i<i16.length;i++)f32[i]=i16[i]/32768;
+  const ab=audioCtx.createBuffer(1,f32.length,16000);ab.copyToChannel(f32,0);
+  const src=audioCtx.createBufferSource();src.buffer=ab;src.connect(audioCtx.destination);
+  const t=Math.max(audioCtx.currentTime+0.06,playhead);
+  src.start(t);playhead=t+ab.duration;
+  activeSources.push(src);src.onended=()=>{activeSources=activeSources.filter(x=>x!==src)};
+}
+function stopPlayback(){activeSources.forEach(s=>{try{s.stop()}catch{}});activeSources=[];playhead=0}
+
+/* -------------------------------------------------- audio in (HUD-proven) */
+const workletCode=`
+class PCM16K extends AudioWorkletProcessor{
+  constructor(){super();this.frac=0;this.acc=0;this.n=0;this.out=[]}
+  process(inputs){
+    const ch=inputs[0][0]; if(!ch)return true;
+    if(sampleRate===16000){
+      for(let i=0;i<ch.length;i++){const v=Math.max(-1,Math.min(1,ch[i]));this.out.push(v*32767|0)}
+    }else{
+      for(let i=0;i<ch.length;i++){
+        this.acc+=ch[i];this.n++;this.frac+=16000;
+        if(this.frac>=sampleRate){this.frac-=sampleRate;
+          const v=Math.max(-1,Math.min(1,this.acc/this.n));this.out.push(v*32767|0);this.acc=0;this.n=0}
+      }
+    }
+    if(this.out.length>=1280){const a=new Int16Array(this.out.splice(0,1280));
+      this.port.postMessage(a.buffer,[a.buffer])}
+    return true;
+  }
+}
+registerProcessor("pcm16k",PCM16K);`;
+async function initMic(){
+  ensureCtx();
+  if(!workletReady){
+    const url=URL.createObjectURL(new Blob([workletCode],{type:"application/javascript"}));
+    await audioCtx.audioWorklet.addModule(url);workletReady=true;
+  }
+  if(!mediaStream){
+    mediaStream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,sampleRate:16000,
+      echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    srcNode=audioCtx.createMediaStreamSource(mediaStream);
+    workletNode=new AudioWorkletNode(audioCtx,"pcm16k");
+    workletNode.port.onmessage=e=>{
+      if(capturing&&wsReady)ws.send(e.data);
+      const a=new Int16Array(e.data);let s=0;
+      for(let i=0;i<a.length;i+=8)s+=Math.abs(a[i]);
+      if(capturing)$("lvlBar").style.width=Math.min(100,((s/(a.length/8))/9000)*100).toFixed(0)+"%";
+    };
+    srcNode.connect(workletNode);
+  }
+}
+async function toggleTalk(){
+  if(!wsReady){addMsg("sys","voice link offline");return}
+  if(capturing){
+    capturing=false;ws.send(JSON.stringify({type:"stop"}));
+    $("mic").classList.remove("live");$("lvlBar").style.width="0%";
+    setState("thinking","think");return;
+  }
+  try{await initMic()}catch(err){addMsg("sys","mic blocked: "+err.message);return}
+  stopPlayback();                                   // barge-in, same as the HUD
+  ws.send(JSON.stringify({type:"start",sample_rate:16000,format:"pcm_s16le",channels:1,conversation:CONV}));
+  capturing=true;$("mic").classList.add("live");setState("listening","listen");
+}
+$("mic").onclick=toggleTalk;
+$("stop").onclick=()=>{if(wsReady)ws.send(JSON.stringify({type:operatorRun?"stop_operator_run":"stop_run"}))};
+addEventListener("keydown",e=>{
+  if(e.code==="Space"&&document.activeElement!==$("say")){e.preventDefault();toggleTalk()}
+  if(e.key==="Escape")closeDetail();
+});
+
+/* ------------------------------------------------------------ typed turn */
+/* The same /api/chat operator turn the HUD makes. No second backend. */
+async function send(){
+  const inp=$("say"),text=inp.value.trim();if(!text||busy)return;
+  if(!wsReady||!operatorChannel){addMsg("sys","Zod channel not ready — reconnecting, try again shortly");return}
+  const ch=operatorChannel;busy=true;inp.value="";inp.disabled=true;
+  if(mode!=="zod")setMode("zod");
+  addMsg("you",text);setState("thinking","think");
+  try{
+    const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({input:text,conversation:CONV,channel_id:ch})});
+    if(r.status===401){showGate();throw new Error("unauthorised")}
+    const j=await r.json();
+    if(!r.ok)throw new Error(j.error||("HTTP "+r.status));
+    if(ch!==operatorChannel)addMsg("sys","reconnected mid-turn — please resend");
+    else if(j.text)addMsg("zod",j.text);
+    else if(j.error)addMsg("sys","operator error: "+j.error);
+    else addMsg("sys","(no reply)");
+    refresh();
+  }catch(err){addMsg("sys","chat error: "+err.message)}
+  finally{busy=false;inp.disabled=false;inp.focus();setState("standby")}
+}
+$("say").addEventListener("keydown",e=>{if(e.key==="Enter")send()});
+
+/* ------------------------------------------------------------ modes/map  */
+document.querySelectorAll("#modes button").forEach(b=>b.onclick=()=>setMode(b.dataset.m));
+function setMode(m){
+  mode=m;
+  document.querySelectorAll("#modes button").forEach(b=>b.classList.toggle("on",b.dataset.m===m));
+  $("zodview").style.display=m==="zod"?"flex":"none";
+  $("mapview").style.display=m==="map"?"block":"none";
+  if(m==="map")drawMap();
+}
+const STATE_COLOR={ACTIVE:"#33d69f",AVAILABLE:"#00e5ff",INTERFACE_ONLY:"#ffb300",PLANNED:"#3c556f"};
+
+function buildNodes(){
+  const c=$("map"),W=c.clientWidth,H=c.clientHeight;
+  const cx=W/2,cy=H/2;
+  nodes=[];
+  const org=data.org,proj=(data.projects||{}).projects||[];
+  if(!org)return;
+  // Ring 1: the control agents that actually run things
+  const control=org.agents.filter(a=>a.dept==="Executive"||a.dept==="Security"||a.dept==="Operations");
+  const r1=Math.min(W,H)*0.19;
+  control.forEach((a,i)=>{
+    const t=(i/control.length)*Math.PI*2-Math.PI/2;
+    nodes.push({x:cx+Math.cos(t)*r1,y:cy+Math.sin(t)*r1,r:7,kind:"agent",
+      color:STATE_COLOR[a.state]||"#3c556f",label:a.name,item:a});
+  });
+  // Ring 2: departments, sized by how many of their roles are real
+  const r2=Math.min(W,H)*0.31;
+  org.departments.forEach((d,i)=>{
+    const list=org.agents.filter(a=>a.dept===d);
+    const live=list.filter(a=>a.state==="ACTIVE"||a.state==="AVAILABLE").length;
+    const t=(i/org.departments.length)*Math.PI*2-Math.PI/2;
+    nodes.push({x:cx+Math.cos(t)*r2,y:cy+Math.sin(t)*r2,r:live?9:6,kind:"dept",
+      color:live?"#00e5ff":"#3c556f",label:d,item:{dept:d,list,live}});
+  });
+  // Ring 3: projects
+  const r3=Math.min(W,H)*0.43;
+  proj.forEach((p,i)=>{
+    const t=(i/Math.max(proj.length,1))*Math.PI*2-Math.PI/2+0.35;
+    nodes.push({x:cx+Math.cos(t)*r3,y:cy+Math.sin(t)*r3,r:12,kind:"project",
+      color:"#8b7dff",label:p.name,item:p});
+  });
+  return {cx,cy,r1,r2,r3};
+}
+function drawMap(){
+  const c=$("map");
+  c.width=c.clientWidth*devicePixelRatio;c.height=c.clientHeight*devicePixelRatio;
+  const x=c.getContext("2d");x.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  const g=buildNodes(); if(!g)return;
+  const W=c.clientWidth,H=c.clientHeight;
+  x.clearRect(0,0,W,H);
+  // orbits
+  [g.r1,g.r2,g.r3].forEach(r=>{
+    x.strokeStyle="rgba(0,229,255,.08)";x.lineWidth=1;
+    x.beginPath();x.arc(g.cx,g.cy,r,0,Math.PI*2);x.stroke();
+  });
+  // links to centre
+  nodes.forEach(n=>{
+    x.strokeStyle=n.kind==="project"?"rgba(139,125,255,.16)":"rgba(0,229,255,.10)";
+    x.beginPath();x.moveTo(g.cx,g.cy);x.lineTo(n.x,n.y);x.stroke();
+  });
+  // Zod at the centre, always the largest body
+  const grd=x.createRadialGradient(g.cx,g.cy,2,g.cx,g.cy,46);
+  grd.addColorStop(0,"#eafeff");grd.addColorStop(.28,"#00e5ff");
+  grd.addColorStop(.62,"rgba(10,111,128,.7)");grd.addColorStop(1,"rgba(0,0,0,0)");
+  x.fillStyle=grd;x.beginPath();x.arc(g.cx,g.cy,46,0,Math.PI*2);x.fill();
+  x.fillStyle="#04121a";x.font="600 12px system-ui";x.textAlign="center";x.textBaseline="middle";
+  x.fillText("ZOD",g.cx,g.cy);
+  // nodes
+  nodes.forEach(n=>{
+    const on=hover===n;
+    x.fillStyle=n.color;x.globalAlpha=on?1:.9;
+    x.beginPath();x.arc(n.x,n.y,n.r+(on?2:0),0,Math.PI*2);x.fill();
+    if(on){x.strokeStyle=n.color;x.globalAlpha=.35;x.lineWidth=6;
+      x.beginPath();x.arc(n.x,n.y,n.r+7,0,Math.PI*2);x.stroke()}
+    x.globalAlpha=1;
+    x.fillStyle=on?"#dce9f7":"rgba(147,171,198,.85)";
+    x.font=(on?"600 ":"")+"11px system-ui";x.textAlign="center";x.textBaseline="top";
+    x.fillText(n.label,n.x,n.y+n.r+5);
+  });
+  // headline numbers, kept to four
+  const o=data.overview;
+  if(o) $("summary").innerHTML=
+    `<div><b>${o.brief.projects_total}</b>projects</div>
+     <div><b>${o.brief.jobs_active}</b>active jobs</div>
+     <div><b>${o.brief.agents_active}</b>agents active</div>
+     <div><b>${pending.size}</b>awaiting you</div>`;
+}
+$("map").addEventListener("mousemove",e=>{
+  const r=$("map").getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+  const was=hover;
+  hover=nodes.find(n=>Math.hypot(n.x-mx,n.y-my)<n.r+9)||null;
+  $("map").style.cursor=hover?"pointer":"default";
+  if(was!==hover)drawMap();
+});
+$("map").addEventListener("click",()=>{if(hover)openDetail(hover)});
+addEventListener("resize",()=>{if(mode==="map")drawMap()});
+
+/* ------------------------------------------------------------- level 3   */
+function closeDetail(){$("detail").classList.remove("open")}
+$("dClose").onclick=closeDetail;
+function openDetail(n){
+  const b=$("dBody");
+  if(n.kind==="project"){
+    const p=n.item,stages=(data.projects||{}).stages||[],si=stages.indexOf(p.stage);
+    const repos=Object.entries(p.repo_state||{}).map(([path,g])=>g.available
+      ?`<div class="row"><span class="k">${esc(path.split("/").pop())}</span>
+          <span class="v">${esc(g.branch)} @ ${esc(g.commit)} · ${g.dirty_tracked} dirty</span></div>`
+      :`<div class="row"><span class="k">${esc(path)}</span><span class="v">${tag("UNKNOWN")}</span></div>`).join("");
+    b.innerHTML=`<div class="kind">Project</div><h2>${esc(p.name)}</h2>
+      <div class="note">${esc(p.objective)}</div>
+      <div class="sec"><h3>Stage</h3><div class="stages">
+        ${stages.map((s,i)=>`<span class="stage ${i<si?"done":i===si?"now":""}">${s}</span>`).join("")}</div></div>
+      <div class="sec"><h3>Status</h3>
+        <div class="row"><span class="k">owner</span><span class="v">${esc(p.owner||"—")}</span></div>
+        <div class="row"><span class="k">next action</span><span class="v l">${esc(p.next_action||"—")}</span></div>
+        <div class="row"><span class="k">blockers</span><span class="v">${(p.blockers||[]).length?esc(p.blockers.join("; ")):"none"}</span></div>
+        ${repos}</div>
+      <div class="sec"><h3>Evidence</h3>${(p.evidence||[]).map(e=>`<div class="mini">${esc(e)}</div>`).join("")||`<div class="empty">none recorded</div>`}</div>
+      <div class="note">source: ${esc(p.source||"unknown")}</div>`;
+  }else if(n.kind==="agent"){
+    const a=n.item;
+    b.innerHTML=`<div class="kind">${esc(a.dept)} · agent</div><h2>${esc(a.name)}</h2>
+      <div style="margin:8px 0 4px">${tag(a.state)}</div>
+      ${a.note?`<div class="note">${esc(a.note)}</div>`:""}
+      <div class="sec"><h3>Assignment</h3>
+        <div class="row"><span class="k">capability</span><span class="v">${esc(a.capability||"—")}</span></div>
+        <div class="row"><span class="k">worker / model</span><span class="v">${esc(a.worker_name||"none")}</span></div>
+        <div class="row"><span class="k">worker state</span><span class="v">${a.worker_state?tag(a.worker_state):"—"}</span></div></div>
+      <div class="note">ACTIVE means proven running now. AVAILABLE means a real worker
+      exists but nothing drives this role yet. Roles are never lit up to look busy.</div>`;
+  }else if(n.kind==="dept"){
+    const d=n.item;
+    b.innerHTML=`<div class="kind">Department</div><h2>${esc(d.dept)}</h2>
+      <div class="note">${d.list.length} role(s), ${d.live} with a real worker behind them.</div>
+      <div class="sec"><h3>Roles</h3>${d.list.map(a=>`<div class="mini">
+        <div class="n">${esc(a.name)} ${tag(a.state)}</div>
+        <div class="k">${esc(a.worker_name||"no worker")}</div></div>`).join("")}</div>`;
+  }
+  $("detail").classList.add("open");
+}
+
+/* -------------------------------------------------------------- refresh  */
+async function api(p){const r=await fetch(p);if(r.status===401){showGate();throw new Error("401")}return r.json()}
+async function refresh(){
+  try{
+    const [o,pr,or_,rs,jb]=await Promise.all([
+      api("/api/universe/overview"),api("/api/universe/projects"),
+      api("/api/universe/organisation"),api("/api/universe/resources"),api("/api/universe/jobs")]);
+    data={overview:o,projects:pr,org:or_,resources:rs,jobs:jb};
+    const warm=(o.brain.resident||[]).length>0;
+    $("dBrain").className="dot "+(warm?"on":"warn");
+    $("sBrain").textContent=warm?"brain warm":"brain cold";
+    if(mode==="map")drawMap();
+  }catch(e){}
+}
+connect();refresh();setInterval(refresh,20000);
+$("say").focus();
+</script>
+</body>
+</html>

@@ -10,7 +10,11 @@ hermes:
   api_key_env: API_SERVER_KEY
   conversation: zod-hud-main
   session_key: zod:user:main
-  timeout: 240
+  # Verification-phase value. A cold zod-qwen3-coder:30b load was measured at
+  # 264.5s, which exceeded the previous 240s budget and turned any load-bearing
+  # turn into a guaranteed timeout. Retune downward once resource-aware model
+  # residency is stable. The approval timeout is deliberately unchanged (300s).
+  timeout: 900
   ack_after_seconds: 0
   ack_texts:
   - On it.

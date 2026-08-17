@@ -83,6 +83,7 @@ button.btn:hover{background:#0e3349; box-shadow:0 0 10px #00e5ff44}
 button.btn.danger{color:var(--red); border-color:#7a2a33; background:#240a0e}
 button.btn.danger:hover{background:#3a0e15; box-shadow:0 0 10px #ff4d5e55}
 button.btn.amber{color:var(--amber); border-color:#7a5a1a; background:#241c0a}
+button.btn:disabled{cursor:default; opacity:.55; box-shadow:none}
 #stopBtn{display:none}
 #approvals{position:absolute; top:8px; left:50%; transform:translateX(-50%); z-index:20; width:min(560px,92%); display:flex; flex-direction:column; gap:8px}
 .appr{border:1px solid var(--amber); background:#1a1305f2; padding:12px 14px;
@@ -91,6 +92,8 @@ button.btn.amber{color:var(--amber); border-color:#7a5a1a; background:#241c0a}
 .appr h3{font-family:'Orbitron'; font-size:11px; letter-spacing:3px; color:var(--amber); margin-bottom:6px}
 .appr pre{font-size:12px; color:#ffd98a; white-space:pre-wrap; word-break:break-all; max-height:90px; overflow-y:auto; margin-bottom:9px}
 .appr .row{display:flex; gap:10px}
+.appr .meta{font-size:11px; color:var(--txt-dim); margin:3px 0}
+.appr .state{font-family:'Orbitron'; font-size:9px; letter-spacing:1px; color:var(--amber); margin-top:10px}
 .msg.live{opacity:.65; font-style:italic}
 /* ---- pop-up viewer (kanban / dashboard) ---- */
 #viewer{position:fixed; inset:0; z-index:40; display:none; align-items:center; justify-content:center;
@@ -449,7 +452,8 @@ function addActivity(text,toolName,preview){
 }
 
 /* live partial transcript bubble */
-let liveEl=null, currentRun=null;
+let liveEl=null, currentRun=null, operatorRun=null, operatorStarting=false, operatorChannel=null;
+const pendingApprovals=new Map();
 function showLive(text){
   if(!text)return;
   if(!liveEl){liveEl=addMsg("you live","");}
@@ -459,24 +463,68 @@ function clearLive(){ if(liveEl){liveEl.remove(); liveEl=null;} }
 function showStop(on){ $("stopBtn").style.display=on?"block":"none"; }
 function stopRun(){
   stopPlayback();
-  if(wsReady)ws.send(JSON.stringify({type:"stop_run"}));
+  if(wsReady)ws.send(JSON.stringify({type:(operatorRun||operatorStarting)?"stop_operator_run":"stop_run"}));
   showStop(false);
 }
 
 /* approval cards */
 function showApproval(e){
-  const data=e.data||{};
   const esc=s=>String(s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
-  const id=data.approval_id||data.id||"";
-  const desc=data.preview||data.command||data.description||JSON.stringify(data).slice(0,300);
+  const token=typeof e.approval_token==="string"?e.approval_token:"";
+  const data=e.summary||{};
+  if(!token||pendingApprovals.has(token)||!data.action)return;
   const card=document.createElement("div"); card.className="appr";
-  card.innerHTML=`<h3>⚠ APPROVAL REQUIRED</h3><pre>${esc(desc)}</pre>
-    <div class="row"><button class="btn">ALLOW</button><button class="btn danger">DENY</button></div>`;
+  card.innerHTML=`<h3>APPROVAL REQUIRED</h3><div class="meta">TOOL: ${esc(data.tool||"Hermes tool")}</div>
+    <pre>${esc(data.action)}</pre><div class="meta">${esc(data.reason||"")}</div>
+    ${data.working_directory?`<div class="meta">CWD: ${esc(data.working_directory)}</div>`:""}
+    ${data.risk?`<div class="meta">RISK: ${esc(data.risk)}</div>`:""}
+    <div class="row"><button class="btn">APPROVE ONCE</button><button class="btn danger">DENY</button></div>
+    <div class="state">WAITING FOR EXPLICIT DECISION</div>`;
   const [allowB,denyB]=card.querySelectorAll("button");
-  const send=dec=>{ if(wsReady)ws.send(JSON.stringify({type:"approval_decision",run_id:e.run_id||currentRun,approval_id:id,decision:dec})); card.remove(); };
-  allowB.onclick=()=>send("allow"); denyB.onclick=()=>send("deny");
+  const state=card.querySelector(".state");
+  const record={card,allowB,denyB,state,runId:e.run_id||"",sent:false,canApproveOnce:e.can_approve_once===true};
+  const setCardState=(text,kind="")=>{
+    state.textContent=text;
+    state.className="state"+(kind?" "+kind:"");
+  };
+  const send=dec=>{
+    if(record.sent||(dec==="once"&&!record.canApproveOnce))return;
+    record.sent=true; allowB.disabled=true; denyB.disabled=true;
+    setCardState(dec==="once"?"APPROVE ONCE SUBMITTED":"DENY SUBMITTED");
+    if(!wsReady||!operatorChannel){setCardState("CONNECTION LOST - NOT APPROVED","err");return;}
+    ws.send(JSON.stringify({type:"approval_decision",approval_token:token,decision:dec}));
+  };
+  if(!record.canApproveOnce){
+    allowB.disabled=true;
+    setCardState("APPROVE ONCE UNAVAILABLE - DENY ONLY","err");
+  }
+  allowB.onclick=()=>send("once"); denyB.onclick=()=>send("deny");
+  record.setState=setCardState;
+  pendingApprovals.set(token,record);
   $("approvals").appendChild(card);
   addActivity("approval requested");
+}
+function approvalState(token,text,kind=""){
+  const record=pendingApprovals.get(token); if(!record)return;
+  record.allowB.disabled=true; record.denyB.disabled=true; record.setState(text,kind);
+}
+function invalidateApprovals(message){
+  pendingApprovals.forEach(record=>{
+    record.allowB.disabled=true; record.denyB.disabled=true; record.setState(message,"err");
+  });
+}
+function finishOperatorRun(e){
+  if(operatorRun===e.run_id)operatorRun=null;
+  pendingApprovals.forEach(record=>{
+    if(record.runId!==e.run_id)return;
+    const decision=e.approval_state==="denied"?"DENIED":e.approval_state==="approved_once"?"APPROVED ONCE":"";
+    record.setState(`${decision?decision+" - ":""}${String(e.state||"finished").toUpperCase()}`,e.state==="failed"?"err":"");
+  });
+  showStop(false);
+  const detail=e.error?": "+e.error:"";
+  addMsg("sys",`operator run ${e.state||"finished"}${detail}`);
+  if(e.state==="failed"||e.state==="timed_out")setState("error","OPERATOR STOPPED");
+  else if(state!=="listening")setState("standby","STANDBY");
 }
 
 /* ============================== websocket ========================== */
@@ -484,20 +532,30 @@ function wsUrl(){return (location.protocol==="https:"?"wss://":"ws://")+location
 function connect(){
   ws=new WebSocket(wsUrl()); ws.binaryType="arraybuffer";
   ws.onopen=()=>{wsReady=true;$("wsDot").className="dot on";$("wsState").textContent="online";$("connState").textContent="LINK ACTIVE";$("footMsg").textContent="VOICE SERVER CONNECTED"};
-  ws.onclose=()=>{wsReady=false;$("wsDot").className="dot off";$("wsState").textContent="offline";$("connState").textContent="LINK DOWN";setState("standby","STANDBY");setTimeout(connect,3000)};
+  ws.onclose=()=>{wsReady=false;operatorChannel=null;operatorRun=null;operatorStarting=false;currentRun=null;invalidateApprovals("CONNECTION LOST - NOT APPROVED");$("wsDot").className="dot off";$("wsState").textContent="offline";$("connState").textContent="LINK DOWN";setState("standby","STANDBY");setTimeout(connect,3000)};
   ws.onerror=()=>{};
   ws.onmessage=ev=>{
     if(ev.data instanceof ArrayBuffer){playChunk(ev.data);return}
     let e; try{e=JSON.parse(ev.data)}catch{return}
-    if(e.type==="summon_panel"){ summonPanel(e); }
+    if(e.type==="operator_ready"){ operatorChannel=typeof e.channel_id==="string"?e.channel_id:null; }
+    else if(e.type==="summon_panel"){ summonPanel(e); }
     else if(e.type==="dismiss_panels"){ dismissAllPanels(); }
     else if(e.type==="partial_transcript"){ showLive(e.text); }
     else if(e.type==="transcript"){ clearLive(); if(e.text)addMsg("you",e.text); }
     else if(e.type==="run_started"){ currentRun=e.run_id; showStop(true); }
+    else if(e.type==="operator_run_started"){ operatorRun=e.run_id; showStop(true); setState("thinking","PROCESSING"); }
     else if(e.type==="approval_request"){ showApproval(e); }
+    else if(e.type==="approval_decision_sent"){ approvalState(e.approval_token,e.decision==="once"?"APPROVE ONCE ACCEPTED - WAITING":"DENY ACCEPTED - WAITING"); }
+    else if(e.type==="approval_resolved"){ approvalState(e.approval_token,e.state==="approved_once"?"APPROVED ONCE - EXECUTING":"DENIED - WAITING FOR HERMES"); }
+    else if(e.type==="approval_expired"){ approvalState(e.approval_token,e.message||"APPROVAL EXPIRED","err"); }
+    else if(e.type==="approval_rejected"){ approvalState(e.approval_token,e.message||"APPROVAL REJECTED","err"); }
+    else if(e.type==="operator_run_stopping"){ addMsg("sys","operator run stopping: "+(e.error||"fail closed")); setState("error","OPERATOR STOPPING"); }
+    else if(e.type==="operator_run_terminal"){ finishOperatorRun(e); }
     else if(e.type==="agent_status"){
       if(e.state==="thinking"){setState("thinking","PROCESSING");showStop(true)}
       else if(e.state==="tool_use"){setState("tool","WORKING");addActivity("",e.tool||"tool",e.preview)}
+      else if(e.state==="tool_completed"){addActivity(`tool completed: ${e.tool||"tool"}`)}
+      else if(e.state==="tool_failed"){addActivity(`tool failed: ${e.tool||"tool"}`)}
       else if(e.state==="speaking")setState("speaking","SPEAKING");
       else if(e.state==="stopped"){setState("standby","STANDBY");showStop(false);stopPlayback();addMsg("sys","run stopped")}
     }
@@ -642,19 +700,25 @@ addEventListener("keydown",e=>{
 /* ============================== typed chat ========================= */
 async function sendChat(){
   const inp=$("chatInput"); const text=inp.value.trim(); if(!text)return;
-  inp.value=""; addMsg("you",text); setState("thinking","PROCESSING");
+  if(!wsReady||!operatorChannel){addMsg("sys","operator channel unavailable; reconnect before sending");return;}
+  const requestChannel=operatorChannel; operatorStarting=true;
+  inp.value=""; inp.disabled=true; $("sendBtn").disabled=true;
+  addMsg("you",text); setState("thinking","PROCESSING");
   try{
     const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({input:text,conversation:CONV})});
+      body:JSON.stringify({input:text,conversation:CONV,channel_id:requestChannel})});
     const j=await r.json();
     if(!r.ok)throw new Error(j.error||r.status);
-    (j.tools||[]).forEach(t=>addActivity("",t.name,t.preview));
-    addMsg("jarvis",j.text||"(no reply)");
+    if(requestChannel!==operatorChannel)return; // do not render a pre-reconnect response
+    if(j.text)addMsg("jarvis",j.text);
+    else if(j.error)addMsg("sys","operator error: "+j.error);
+    else addMsg("jarvis","(no reply)");
     refreshLoadout();
     if(/^\/(new|reset|clear)\b/i.test(text)){     // slash reset → also clear the visible feed
       setTimeout(()=>{feed.innerHTML="";addMsg("sys","conversation reset");},800);
     }
   }catch(err){ addMsg("sys","chat error: "+err.message); }
+  finally{operatorStarting=false; inp.disabled=false; $("sendBtn").disabled=false;}
   if(state!=="listening")setState("standby","STANDBY");
 }
 $("sendBtn").onclick=sendChat;

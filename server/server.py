@@ -208,10 +208,53 @@ class HermesAPI:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
 
-    # Hermes paginates /api/sessions and defaults to the newest 50. A named
-    # conversation that has fallen behind that many newer sessions must still be
-    # found by title, so every lookup asks for the full list explicitly.
-    _SESSION_LIST_LIMIT = 500
+    # Hermes paginates /api/sessions: `limit` defaults to 50 and is CLAMPED
+    # SERVER-SIDE TO 200, with `offset` and `has_more` for paging. Asking for a
+    # larger page therefore does not widen the search — the request is silently
+    # truncated — so a named conversation sitting past the first page is simply
+    # not found, Zod tries to recreate the title, Hermes answers
+    # 400 invalid_title, and the conversation dies. Page properly instead.
+    _SESSION_PAGE_SIZE = 200
+    # Safety valve so a misbehaving API can never spin this forever.
+    _SESSION_SCAN_CAP = 100_000
+
+    def iter_sessions(self):
+        """Yield every session, following Hermes's pagination to the end."""
+        offset = 0
+        scanned = 0
+        while True:
+            r = requests.get(
+                f"{self.base}/api/sessions",
+                headers=self.headers(),
+                params={"limit": self._SESSION_PAGE_SIZE, "offset": offset},
+                timeout=15,
+            )
+            if not r.ok:
+                return
+            try:
+                body = r.json() or {}
+            except ValueError:
+                return
+            items = body.get("data") or []
+            for item in items:
+                yield item
+            scanned += len(items)
+            # Stop on an explicit has_more=False, on an empty page, or if the
+            # server ignored `offset` and would replay the same page forever.
+            if not items or not body.get("has_more") or scanned >= self._SESSION_SCAN_CAP:
+                return
+            offset += len(items)
+
+    def find_session_by_title(self, name: str, model: str) -> tuple[str | None, bool]:
+        """Return (session_id_matching_model, title_taken_by_other_model)."""
+        title_taken = False
+        for item in self.iter_sessions():
+            if item.get("title") != name or not item.get("id"):
+                continue
+            if item.get("model") == model:
+                return item["id"], title_taken
+            title_taken = True
+        return None, title_taken
 
     def get_session_id(self, name: str, force_new: bool = False) -> str:
         state = self._load_state()
@@ -240,22 +283,11 @@ class HermesAPI:
         title_taken = False
         if not force_new:
             try:
-                existing = requests.get(
-                    f"{self.base}/api/sessions",
-                    headers=self.headers(),
-                    params={"limit": self._SESSION_LIST_LIMIT},
-                    timeout=15,
-                )
-                if existing.ok:
-                    for item in existing.json().get("data") or []:
-                        if item.get("title") != name or not item.get("id"):
-                            continue
-                        if item.get("model") == self.cfg.get("model"):
-                            sid = item["id"]
-                            state[name] = sid
-                            self._save_state(state)
-                            return sid
-                        title_taken = True
+                found, title_taken = self.find_session_by_title(name, self.cfg.get("model"))
+                if found:
+                    state[name] = found
+                    self._save_state(state)
+                    return found
             except Exception:
                 pass
 
@@ -265,26 +297,17 @@ class HermesAPI:
 
         if r.status_code == 400 and "invalid_title" in r.text:
             # Hermes says the title is taken, so the session exists somewhere in
-            # the full list — not necessarily on the default (newest 50) page.
-            # Without an explicit limit this lookup re-reads the same page, finds
-            # nothing, and falls through to raise_for_status(), surfacing a bare
-            # "400 Bad Request for url: .../api/sessions" to the user. That is
-            # exactly how a long-lived conversation breaks once enough newer
-            # sessions exist, and it takes typed chat and voice down together
-            # because both resolve their session through here.
-            existing = requests.get(
-                f"{self.base}/api/sessions",
-                headers=self.headers(),
-                params={"limit": self._SESSION_LIST_LIMIT},
-                timeout=15,
-            )
-            existing.raise_for_status()
-            for item in existing.json().get("data") or []:
-                if item.get("title") == name and item.get("id") and item.get("model") == self.cfg.get("model"):
-                    sid = item["id"]
-                    state[name] = sid
-                    self._save_state(state)
-                    return sid
+            # the full list. Re-reading only the first page finds nothing and
+            # falls through to raise_for_status(), surfacing a bare
+            # "400 Bad Request for url: .../api/sessions" — which is exactly how
+            # a long-lived conversation dies once enough newer sessions exist.
+            # It takes typed chat and voice down together, because both resolve
+            # their session through here.
+            found, _ = self.find_session_by_title(name, self.cfg.get("model"))
+            if found:
+                state[name] = found
+                self._save_state(state)
+                return found
 
         r.raise_for_status()
         data = r.json()

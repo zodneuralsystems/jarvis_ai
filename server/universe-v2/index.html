@@ -84,6 +84,36 @@ button{cursor:pointer;background:none;border:none}
 #summary{position:absolute;left:20px;top:18px;display:flex;gap:20px;font-size:12px;color:var(--dim)}
 #summary b{color:var(--txt);font-family:var(--mono);font-size:16px;display:block;font-weight:600}
 
+/* Level 2b — live visual army / observatory */
+#armyview{position:absolute;inset:0;display:none;overflow-y:auto;padding:18px 20px 28px}
+#armyHead{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}
+#armyHead .mission{flex:1;min-width:280px}
+#armyHead h2{margin:2px 0 5px;font-size:17px;font-weight:600}
+.eyebrow{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim2)}
+.pills{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
+.pill{border:1px solid var(--line);background:rgba(8,18,32,.7);border-radius:16px;padding:4px 8px;
+  color:var(--dim);font:10.5px var(--mono);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#armySummary{display:grid;grid-template-columns:repeat(6,minmax(110px,1fr));gap:7px;margin-bottom:10px}
+.metric{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:8px 10px;min-width:0}
+.metric b{display:block;font:600 13px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.metric span{display:block;color:var(--dim2);font-size:9px;letter-spacing:.1em;text-transform:uppercase;margin-top:2px}
+#graphWrap{height:300px;border:1px solid var(--line);border-radius:12px;background:rgba(5,13,23,.74);position:relative;overflow:hidden}
+#workGraph{width:100%;height:100%;display:block}
+#graphHint{position:absolute;right:10px;top:8px;color:var(--dim2);font:9.5px var(--mono)}
+#armyGrid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(300px,1fr);gap:10px;margin-top:10px}
+.armyPanel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:11px;min-width:0}
+.armyPanel h3{margin:0 0 9px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim2)}
+#agentCards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+.agentCard{border:1px solid rgba(0,229,255,.1);border-radius:9px;padding:9px;background:rgba(5,14,25,.66);min-width:0}
+.agentCard .top{display:flex;align-items:center;justify-content:space-between;gap:7px;margin-bottom:5px}
+.agentCard .name{font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.facts{display:grid;grid-template-columns:92px 1fr;gap:3px 7px;font-size:10.5px;line-height:1.4}
+.facts .fk{color:var(--dim2)}.facts .fv{font-family:var(--mono);overflow-wrap:anywhere}
+.traceItem{border-left:2px solid rgba(0,229,255,.22);padding:5px 0 5px 9px;margin:5px 0;font-size:10.5px;line-height:1.45}
+.traceItem .tl{color:var(--dim2);font:9px var(--mono);text-transform:uppercase;letter-spacing:.08em}
+@media(max-width:900px){#armySummary{grid-template-columns:repeat(3,1fr)}#armyGrid{grid-template-columns:1fr}#agentCards{grid-template-columns:1fr}}
+@media(max-width:560px){#armySummary{grid-template-columns:repeat(2,1fr)}#armyview{padding:12px}#graphWrap{height:250px}}
+
 /* Level 3 — detail, an overlay that never replaces Zod */
 #detail{position:absolute;right:0;top:0;bottom:0;width:min(460px,46vw);z-index:6;
   background:rgba(5,12,22,.95);border-left:1px solid var(--line);backdrop-filter:blur(14px);
@@ -167,6 +197,7 @@ button{cursor:pointer;background:none;border:none}
     <div id="modes">
       <button data-m="zod" class="on">ZOD</button>
       <button data-m="map">UNIVERSE</button>
+      <button data-m="army">ARMY</button>
     </div>
     <div class="spacer"></div>
     <div class="chip"><span class="dot" id="dLink"></span><span id="sLink">link</span></div>
@@ -190,6 +221,16 @@ button{cursor:pointer;background:none;border:none}
         <span><i style="background:var(--cyan)"></i>available</span>
         <span><i style="background:var(--amber)"></i>interface only</span>
         <span><i style="background:#3c556f"></i>planned</span>
+      </div>
+    </div>
+
+    <div id="armyview">
+      <div id="armyHead"></div>
+      <div id="armySummary"></div>
+      <div id="graphWrap"><canvas id="workGraph"></canvas><div id="graphHint">structured execution facts only</div></div>
+      <div id="armyGrid">
+        <div class="armyPanel"><h3>Live agent observatory</h3><div id="agentCards"></div></div>
+        <div class="armyPanel"><h3>Collaboration · evidence · control</h3><div id="armyTrace"></div></div>
       </div>
     </div>
 
@@ -456,7 +497,9 @@ function setMode(m){
   document.querySelectorAll("#modes button").forEach(b=>b.classList.toggle("on",b.dataset.m===m));
   $("zodview").style.display=m==="zod"?"flex":"none";
   $("mapview").style.display=m==="map"?"block":"none";
+  $("armyview").style.display=m==="army"?"block":"none";
   if(m==="map")drawMap();
+  if(m==="army")renderArmy();
 }
 const STATE_COLOR={ACTIVE:"#33d69f",AVAILABLE:"#00e5ff",INTERFACE_ONLY:"#ffb300",PLANNED:"#3c556f"};
 
@@ -546,6 +589,97 @@ $("map").addEventListener("mousemove",e=>{
 $("map").addEventListener("click",()=>{if(hover)openDetail(hover)});
 addEventListener("resize",()=>{if(mode==="map")drawMap()});
 
+/* ------------------------------------------------------ visual observatory */
+function val(v,fallback="—"){
+  if(v===null||v===undefined||v==="")return fallback;
+  if(typeof v==="object")return JSON.stringify(v);
+  return String(v);
+}
+function arr(v){return Array.isArray(v)?v:[]}
+function activeObsJob(){
+  const jobs=(data.observatory||{}).jobs||[];
+  return jobs.find(j=>j.state==="RUNNING"||j.state==="CONTINUING"||j.state==="AWAITING_APPROVAL")||jobs[0]||null;
+}
+function renderWorkGraph(job){
+  const c=$("workGraph"),r=c.getBoundingClientRect();
+  if(!r.width||!r.height)return;
+  c.width=r.width*devicePixelRatio;c.height=r.height*devicePixelRatio;
+  const x=c.getContext("2d");x.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  const W=r.width,H=r.height;x.clearRect(0,0,W,H);
+  const agents=arr(job&&job.agents);
+  const stages=arr(job&&job.stages);
+  const items=agents.length?agents.slice(0,12):stages.slice(0,12).map((s,i)=>({
+    id:s,name:s,role:"work slice",state:arr(job.completed_stages).includes(s)?"COMPLETED":(i===arr(job.completed_stages).length?"RUNNING":"PLANNED"),
+    dependencies:i?[stages[i-1]]:[],assignment_reason:"durable job stage"
+  }));
+  const root={x:Math.min(150,W*.18),y:H/2};
+  x.fillStyle="#00e5ff";x.globalAlpha=.22;x.beginPath();x.arc(root.x,root.y,38,0,Math.PI*2);x.fill();x.globalAlpha=1;
+  x.fillStyle="#dce9f7";x.font="600 11px system-ui";x.textAlign="center";x.fillText("MISSION",root.x,root.y-3);
+  x.fillStyle="#93abc6";x.font="9px ui-monospace";x.fillText((job&&job.job_id||"no job").slice(0,24),root.x,root.y+13);
+  const pos=new Map();
+  items.forEach((a,i)=>{
+    const cols=Math.max(1,Math.min(4,Math.ceil(Math.sqrt(items.length||1))));
+    const rows=Math.ceil(items.length/cols),col=i%cols,row=Math.floor(i/cols);
+    const px=Math.max(270,W*.36)+(W-Math.max(310,W*.38))*((col+.5)/cols);
+    const py=38+(H-76)*((row+.5)/rows);pos.set(String(a.id),{x:px,y:py,a});
+  });
+  items.forEach((a,i)=>{
+    const p=pos.get(String(a.id));
+    const deps=arr(a.dependencies);
+    if(!deps.length){x.strokeStyle="rgba(0,229,255,.12)";x.beginPath();x.moveTo(root.x+38,root.y);x.lineTo(p.x-20,p.y);x.stroke()}
+    deps.forEach(d=>{const q=pos.get(String(d));if(q){x.strokeStyle="rgba(139,125,255,.30)";x.beginPath();x.moveTo(q.x,q.y);x.lineTo(p.x,p.y);x.stroke()}});
+  });
+  items.forEach(a=>{
+    const p=pos.get(String(a.id)),color=a.state==="COMPLETED"||a.state==="ACTIVE"?"#33d69f":a.state==="RUNNING"?"#00e5ff":a.state==="BLOCKED"?"#ff5470":"#5d7793";
+    x.fillStyle=color;x.globalAlpha=.9;x.beginPath();x.arc(p.x,p.y,7,0,Math.PI*2);x.fill();x.globalAlpha=1;
+    x.fillStyle="#dce9f7";x.font="10px system-ui";x.textAlign="center";x.fillText(String(a.name||a.id).slice(0,24),p.x,p.y+14);
+    if(a.parallel_group){x.fillStyle="#8b7dff";x.font="8px ui-monospace";x.fillText("parallel "+String(a.parallel_group).slice(0,12),p.x,p.y+26)}
+  });
+  if(!items.length){x.fillStyle="#5d7793";x.font="11px ui-monospace";x.textAlign="center";x.fillText("No work slices or agent assignments recorded",W*.62,H*.5)}
+}
+function renderArmy(){
+  const job=activeObsJob(),obs=data.observatory||{};
+  if(!job){
+    $("armyHead").innerHTML=`<div class="mission"><div class="eyebrow">Visual Army</div><h2>No durable mission recorded</h2><div class="note">Waiting for a job record through the existing Universe API.</div></div>`;
+    $("armySummary").innerHTML="";$("agentCards").innerHTML=`<div class="empty">No mission agents recorded.</div>`;$("armyTrace").innerHTML="";renderWorkGraph(null);return;
+  }
+  const stopState=(job.stop&&job.stop.state)||job.stop||"AVAILABLE_VIA_HUD";
+  const scarce=job.scarce_tier||{},used=arr(scarce.used),avoided=arr(scarce.avoided);
+  $("armyHead").innerHTML=`<div class="mission"><div class="eyebrow">Mission · ${esc(job.job_id)}</div><h2>${esc(job.mission)}</h2>
+    <div class="pills"><span class="pill">${esc(job.state)}</span><span class="pill">EXECUTOR=${esc(val(job.executor))}</span>
+    <span class="pill">PROVIDER=${esc(val(job.provider))}</span><span class="pill">MODEL=${esc(val(job.model))}</span>
+    <span class="pill">HEALTH=${esc(val(job.health))}</span><span class="pill">QUOTA=${esc(val(job.quota))}</span>
+    <span class="pill">HEARTBEAT=${esc(val(job.heartbeat))}</span><span class="pill">PARALLEL=${esc(val(job.parallel_group,"none"))}</span>
+    <span class="pill">SOURCE=${esc(val(job.source))}</span></div></div>
+    <div class="pill">STOP=${esc(val(stopState))}</div>`;
+  const agents=arr(job.agents),blocked=agents.filter(a=>a.blocker).length,retries=agents.reduce((n,a)=>n+(Number(a.retries)||0),Number(job.retries)||0);
+  $("armySummary").innerHTML=[
+    [agents.length,"agents assigned"],[agents.filter(a=>a.state==="RUNNING"||a.state==="ACTIVE").length,"active now"],
+    [blocked+(job.blocker?1:0),"blockers"],[retries,"retries"],[arr(job.handoffs).length,"handoffs"],[used.length+" / "+avoided.length,"scarce used / avoided"]
+  ].map(m=>`<div class="metric"><b>${esc(m[0])}</b><span>${esc(m[1])}</span></div>`).join("");
+  const shown=agents.length?agents:arr(obs.registry_agents).slice(0,16);
+  $("agentCards").innerHTML=shown.length?shown.map(a=>`<div class="agentCard"><div class="top"><div class="name">${esc(a.name)}</div>${tag(a.state)}</div>
+    <div class="facts"><div class="fk">role</div><div class="fv">${esc(val(a.role))}</div>
+    <div class="fk">why assigned</div><div class="fv">${esc(val(a.assignment_reason,"not recorded"))}</div>
+    <div class="fk">executor</div><div class="fv">${esc(val(a.executor))}</div><div class="fk">provider / model</div><div class="fv">${esc(val(a.provider))} / ${esc(val(a.model))}</div>
+    <div class="fk">dependencies</div><div class="fv">${esc(arr(a.dependencies).join(", ")||"none")}</div><div class="fk">parallel</div><div class="fv">${esc(val(a.parallel_group,"none"))}</div>
+    <div class="fk">heartbeat</div><div class="fv">${esc(val(a.heartbeat))}</div><div class="fk">context / budget</div><div class="fv">${esc(val(a.context))} / ${esc(val(a.budget))}</div>
+    <div class="fk">quota / health</div><div class="fv">${esc(val(a.quota))} / ${esc(val(a.health))}</div><div class="fk">retries</div><div class="fv">${esc(val(a.retries,"0"))}</div>
+    <div class="fk">blocker</div><div class="fv">${esc(val(a.blocker,"none"))}</div><div class="fk">machine acceptance</div><div class="fv">${esc(val(a.machine_acceptance,"not recorded"))}</div></div></div>`).join(""):`<div class="empty">No agents recorded.</div>`;
+  const trace=[];
+  arr(job.handoffs).forEach(v=>trace.push(["handoff",val(v)]));
+  if(job.failover)trace.push(["failover",val(job.failover)]);
+  arr(job.supervisor_interventions).forEach(v=>trace.push(["supervisor",val(v)]));
+  if(job.machine_acceptance)trace.push(["machine acceptance",val(job.machine_acceptance)]);
+  arr(job.recorded_evidence).slice(0,8).forEach(e=>trace.push(["evidence",(e.action?e.action+": ":"")+val(e.result)]));
+  arr(job.evidence).slice(0,6).forEach(e=>trace.push(["evidence",val(e)]));
+  trace.push(["STOP propagation",val(stopState)]);
+  trace.push(["scarce tier used",used.join(", ")||"none"]);trace.push(["scarce tier avoided",avoided.join(", ")||"none"]);
+  $("armyTrace").innerHTML=trace.map(([l,v])=>`<div class="traceItem"><div class="tl">${esc(l)}</div>${esc(v)}</div>`).join("")+
+    `<div class="note">${esc(obs.reasoning_policy||"Structured reasons and evidence only; raw chain-of-thought is never exposed.")}</div>`;
+  renderWorkGraph(job);
+}
+
 /* ------------------------------------------------------------- level 3   */
 function closeDetail(){$("detail").classList.remove("open")}
 $("dClose").onclick=closeDetail;
@@ -594,14 +728,16 @@ function openDetail(n){
 async function api(p){const r=await fetch(p);if(r.status===401){showGate();throw new Error("401")}return r.json()}
 async function refresh(){
   try{
-    const [o,pr,or_,rs,jb]=await Promise.all([
+    const [o,pr,or_,rs,jb,ob]=await Promise.all([
       api("/api/universe/overview"),api("/api/universe/projects"),
-      api("/api/universe/organisation"),api("/api/universe/resources"),api("/api/universe/jobs")]);
-    data={overview:o,projects:pr,org:or_,resources:rs,jobs:jb};
+      api("/api/universe/organisation"),api("/api/universe/resources"),api("/api/universe/jobs"),
+      api("/api/universe/observatory")]);
+    data={overview:o,projects:pr,org:or_,resources:rs,jobs:jb,observatory:ob};
     const warm=(o.brain.resident||[]).length>0;
     $("dBrain").className="dot "+(warm?"on":"warn");
     $("sBrain").textContent=warm?"brain warm":"brain cold";
     if(mode==="map")drawMap();
+    if(mode==="army")renderArmy();
   }catch(e){}
 }
 connect();refresh();setInterval(refresh,20000);

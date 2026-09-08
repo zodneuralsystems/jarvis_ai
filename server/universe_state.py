@@ -36,6 +36,20 @@ STAGES = ["IDEA", "RESEARCH", "VALIDATE", "BUILD", "TEST", "LAUNCH", "GROW",
 JOB_STATES = ["PLANNED", "RUNNING", "BLOCKED", "AWAITING_APPROVAL", "COMPLETED",
               "FAILED", "CANCELLED"]
 
+# Optional mission-observability fields accepted by the existing job seam. They
+# are deliberately structured facts only. Private model reasoning is never
+# persisted by this store or returned to the HUD observatory.
+OBSERVABILITY_FIELDS = (
+    "mission", "role", "assignment_reason", "executor", "provider", "model",
+    "dependencies", "parallel_group", "heartbeat", "context", "budget", "quota",
+    "health", "retries", "handoffs", "failover", "supervisor_interventions",
+    "machine_acceptance", "stop", "scarce_tier", "agents",
+)
+_PRIVATE_REASONING_KEYS = {
+    "chain_of_thought", "chain-of-thought", "cot", "reasoning", "raw_reasoning",
+    "hidden_reasoning", "thinking",
+}
+
 
 def _now() -> float:
     return time.time()
@@ -60,6 +74,27 @@ def _read(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return default
+
+
+def _safe_observability(value: Any, depth: int = 0) -> Any:
+    """Bound and redact observability payloads before they become durable state."""
+    if depth > 5:
+        return None
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:1200]
+    if isinstance(value, list):
+        return [_safe_observability(v, depth + 1) for v in value[:80]]
+    if isinstance(value, dict):
+        out = {}
+        for raw_key, raw_value in list(value.items())[:80]:
+            key = str(raw_key)[:120]
+            if key.strip().lower() in _PRIVATE_REASONING_KEYS:
+                continue
+            out[key] = _safe_observability(raw_value, depth + 1)
+        return out
+    return str(value)[:1200]
 
 
 # --------------------------------------------------------------------- seeding
@@ -246,6 +281,9 @@ def upsert_job(payload: dict) -> dict:
         for key in ("stages", "completed_stages", "evidence"):
             if key in payload and isinstance(payload[key], list):
                 record[key] = [str(x)[:400] for x in payload[key]]
+        for key in OBSERVABILITY_FIELDS:
+            if key in payload:
+                record[key] = _safe_observability(payload[key])
         record["state"] = state
         record["updated_at"] = _now()
         record.setdefault("stages", [])

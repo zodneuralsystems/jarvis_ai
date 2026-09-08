@@ -12,9 +12,13 @@ synthesises progress, revenue, agent activity or test results.
 from __future__ import annotations
 
 import asyncio
+import importlib
+import os
 import shutil
 import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import psutil
@@ -37,6 +41,267 @@ router = APIRouter(prefix="/api/universe")
 
 _CFG: dict = {}
 _HERMES_BASE = "http://127.0.0.1:8642"
+
+CODEX_WEB_EXECUTOR = "Codex Web Harness"
+CODEX_WEB_MODEL = "ChatGPT Web — High"
+
+_CONTINUATION_ROOT = Path(
+    os.environ.get("ZOD_CONTINUATION_ROOT", str(Path.home() / "Zod-Continuation"))
+).expanduser()
+_CONTINUATION_BIN = _CONTINUATION_ROOT / "bin"
+
+
+def _continuation_api():
+    """Load the authoritative Continuation read API when it is present locally.
+
+    The HUD consumes Continuation's existing public live-view contract instead
+    of reinterpreting raw job state. Import failure is a read-only degradation:
+    the existing HUD store remains available as history/fallback.
+    """
+    package = _CONTINUATION_BIN / "zod_continuation" / "control_plane_api.py"
+    if not package.is_file():
+        return None
+    bin_path = str(_CONTINUATION_BIN)
+    if bin_path not in sys.path:
+        sys.path.insert(0, bin_path)
+    try:
+        return importlib.import_module("zod_continuation.control_plane_api")
+    except Exception:
+        return None
+
+
+def _continuation_evidence(view: dict) -> list[str]:
+    """Expose bounded machine facts only; never forward free-form worker prose."""
+    facts: list[str] = []
+    acceptance = view.get("acceptance") or {}
+    total = acceptance.get("criteria_total")
+    passed = acceptance.get("criteria_passed")
+    if total is not None:
+        facts.append(f"machine acceptance: {passed if passed is not None else '?'} / {total}")
+    receipts = view.get("receipts") or {}
+    if receipts.get("total") is not None:
+        facts.append(
+            "side-effect receipts: "
+            f"{receipts.get('confirmed', 0)} confirmed / {receipts.get('total', 0)} total"
+        )
+    if view.get("state_dir"):
+        facts.append(f"durable state directory: {view['state_dir']}")
+    return facts[:8]
+
+
+def _continuation_observatory_job(view: dict) -> dict:
+    """Translate Continuation's authoritative live view into HUD observability."""
+    worker = view.get("current_worker")
+    route = view.get("current_route")
+    is_codex_web = worker == "codex-web-harness" or route == "codex-web-harness"
+    executor = CODEX_WEB_EXECUTOR if is_codex_web else worker
+    model = CODEX_WEB_MODEL if is_codex_web else view.get("current_model")
+    role = view.get("current_role") or "implementation"
+    assignment_reason = (
+        f"Continuation selected route {route}" if route else "Continuation route decision"
+    )
+    state = view.get("state") or "UNKNOWN"
+    history_agents: list[dict] = []
+    previous_id: str | None = None
+    for idx, item in enumerate((view.get("worker_history") or [])[-12:]):
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("client_kind") or item.get("route")
+        hist_is_web = kind == "codex-web-harness" or item.get("route") == "codex-web-harness"
+        hist_id = str(item.get("slice_id") or f"{view.get('job_id') or 'job'}-history-{idx + 1}")
+        hist_route = item.get("route")
+        history_agents.append({
+            "id": hist_id,
+            "name": kind or "Continuation worker",
+            "role": "implementation",
+            "state": "HISTORICAL",
+            "assignment_reason": (
+                f"Continuation selected route {hist_route}" if hist_route else "Continuation route decision"
+            ),
+            "executor": CODEX_WEB_EXECUTOR if hist_is_web else kind,
+            "provider": item.get("provider"),
+            "model": CODEX_WEB_MODEL if hist_is_web else item.get("model"),
+            "dependencies": [previous_id] if previous_id else [],
+            "parallel_group": None,
+            "heartbeat": item.get("at"),
+            "context": {"slice_id": item.get("slice_id")},
+            "budget": {},
+            "quota": {},
+            "health": item.get("end_reason") or "ENDED",
+            "evidence": [],
+            "blocker": None,
+            "retries": 0,
+            "handoff": {"end_reason": item.get("end_reason")},
+            "failover": None,
+            "supervisor": None,
+            "machine_acceptance": {},
+            "stop": {"state": "ENDED"},
+            "scarce_tier": {"used": [], "avoided": []},
+        })
+        previous_id = hist_id
+
+    agent = {
+        "id": f"{view.get('job_id') or 'job'}-active",
+        "name": worker or route or "Continuation worker",
+        "role": role,
+        "state": state,
+        "assignment_reason": assignment_reason,
+        "executor": executor,
+        "provider": view.get("current_provider"),
+        "model": model,
+        "dependencies": [previous_id] if previous_id else [],
+        "parallel_group": None,
+        "heartbeat": view.get("last_meaningful_progress") or view.get("updated_at"),
+        "context": {"slice": view.get("current_slice"), "slice_id": view.get("current_slice_id")},
+        "budget": view.get("budgets") or {},
+        "quota": {"remaining_budget": view.get("remaining_budget") or {}},
+        "health": "ACTIVE" if state in {"RUNNING", "CONTINUING"} else state,
+        "evidence": _continuation_evidence(view),
+        "blocker": view.get("blocker"),
+        "retries": (view.get("spend") or {}).get("failures", 0),
+        "handoff": {"count": view.get("handoffs", 0)},
+        "failover": {"count": (view.get("spend") or {}).get("provider_failovers", 0)},
+        "supervisor": None,
+        "machine_acceptance": view.get("acceptance") or {},
+        "stop": {
+            "state": "STOPPED" if state == "STOPPED" else "AVAILABLE_VIA_CONTINUATION",
+            "reason": view.get("stop_reason"),
+        },
+        "scarce_tier": {"used": [], "avoided": []},
+    }
+    return {
+        "id": view.get("job_id") or "unknown-job",
+        "mission": view.get("objective") or "mission not recorded",
+        "state": state,
+        "role": role,
+        "assignment_reason": assignment_reason,
+        "executor": executor,
+        "provider": view.get("current_provider"),
+        "model": model,
+        "dependencies": [],
+        "parallel_group": None,
+        "heartbeat": view.get("last_meaningful_progress") or view.get("updated_at"),
+        "context": {
+            "workdir": view.get("workdir"),
+            "current_step": view.get("current_step"),
+            "current_slice": view.get("current_slice"),
+            "slice_count": view.get("slice_count"),
+        },
+        "budget": view.get("budgets") or {},
+        "quota": {"remaining_budget": view.get("remaining_budget") or {}},
+        "health": "ACTIVE" if state in {"RUNNING", "CONTINUING"} else state,
+        "evidence": _continuation_evidence(view),
+        "blocker": view.get("blocker"),
+        "retries": (view.get("spend") or {}).get("failures", 0),
+        "handoffs": [{"count": view.get("handoffs", 0)}] if view.get("handoffs") else [],
+        "failover": {"count": (view.get("spend") or {}).get("provider_failovers", 0)},
+        "supervisor_interventions": [],
+        "machine_acceptance": view.get("acceptance") or {},
+        "stop": agent["stop"],
+        "scarce_tier": {"used": [], "avoided": []},
+        "agents": history_agents + ([agent] if worker or route else []),
+        "source": "Zod-Continuation authoritative live view",
+    }
+
+
+def _continuation_jobs() -> tuple[list[dict], str]:
+    api = _continuation_api()
+    if api is None:
+        return [], "UNAVAILABLE"
+    try:
+        rows = api.list_jobs(limit=100)
+    except Exception:
+        return [], "DEGRADED"
+    return [_continuation_observatory_job(row) for row in rows if isinstance(row, dict)], "LIVE"
+
+
+def _as_list(value: Any) -> list:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _display_identity(value: Any, kind: str) -> Any:
+    """Keep the subscription-backed Web harness distinct from native Codex/Astra."""
+    if not isinstance(value, str):
+        return value
+    folded = value.strip().lower().replace("_", "-")
+    if kind == "executor" and folded in {
+        "codex-web-harness", "codex web harness", "codex-chatgpt-web",
+    }:
+        return CODEX_WEB_EXECUTOR
+    if kind == "model" and folded in {
+        "chatgpt-web/high", "chatgpt web high", "chatgpt-web-high",
+        "chatgpt web — high", "chatgpt web - high",
+    }:
+        return CODEX_WEB_MODEL
+    return value
+
+
+def _observatory_agent(agent: dict) -> dict:
+    """Allow-list structured execution facts; never forward free-form reasoning."""
+    worker_name = agent.get("worker_name")
+    return {
+        "id": agent.get("id") or agent.get("name") or "agent",
+        "name": agent.get("name") or agent.get("id") or "Agent",
+        "role": agent.get("role") or agent.get("capability") or "unassigned",
+        "state": agent.get("state") or "UNKNOWN",
+        "assignment_reason": agent.get("assignment_reason") or agent.get("note") or "not recorded",
+        "executor": _display_identity(agent.get("executor") or ("Zod local worker" if worker_name else None), "executor"),
+        "provider": agent.get("provider"),
+        "model": _display_identity(agent.get("model") or worker_name, "model"),
+        "dependencies": _as_list(agent.get("dependencies")),
+        "parallel_group": agent.get("parallel_group"),
+        "heartbeat": agent.get("heartbeat"),
+        "context": agent.get("context") or {},
+        "budget": agent.get("budget") or {},
+        "quota": agent.get("quota") or {},
+        "health": agent.get("health") or agent.get("worker_state") or "UNKNOWN",
+        "evidence": _as_list(agent.get("evidence")),
+        "blocker": agent.get("blocker"),
+        "retries": agent.get("retries") or 0,
+        "handoff": agent.get("handoff"),
+        "failover": agent.get("failover"),
+        "supervisor": agent.get("supervisor"),
+        "machine_acceptance": agent.get("machine_acceptance"),
+        "stop": agent.get("stop"),
+        "scarce_tier": agent.get("scarce_tier"),
+    }
+
+
+def _observatory_job(job: dict, recorded_evidence: list[dict]) -> dict:
+    job_id = str(job.get("id") or "unknown-job")
+    agents = [_observatory_agent(a) for a in (job.get("agents") or []) if isinstance(a, dict)]
+    evidence = [e for e in recorded_evidence if e.get("job") == job_id][:30]
+    return {
+        "job_id": job_id,
+        "mission": job.get("mission") or job.get("objective") or "mission not recorded",
+        "state": job.get("state") or "UNKNOWN",
+        "role": job.get("role"),
+        "assignment_reason": job.get("assignment_reason") or "not recorded",
+        "executor": _display_identity(job.get("executor") or job.get("worker"), "executor"),
+        "provider": job.get("provider"),
+        "model": _display_identity(job.get("model"), "model"),
+        "dependencies": _as_list(job.get("dependencies")),
+        "parallel_group": job.get("parallel_group"),
+        "heartbeat": job.get("heartbeat") or job.get("updated_at"),
+        "context": job.get("context") or {},
+        "budget": job.get("budget") or {},
+        "quota": job.get("quota") or {},
+        "health": job.get("health") or "UNKNOWN",
+        "evidence": _as_list(job.get("evidence")),
+        "recorded_evidence": evidence,
+        "blocker": job.get("blocker"),
+        "retries": job.get("retries") or 0,
+        "handoffs": _as_list(job.get("handoffs")),
+        "failover": job.get("failover"),
+        "supervisor_interventions": _as_list(job.get("supervisor_interventions")),
+        "machine_acceptance": job.get("machine_acceptance"),
+        "stop": job.get("stop") or {"state": "AVAILABLE_VIA_HUD"},
+        "scarce_tier": job.get("scarce_tier") or {"used": [], "avoided": []},
+        "stages": _as_list(job.get("stages")),
+        "completed_stages": _as_list(job.get("completed_stages")),
+        "agents": agents,
+        "source": job.get("source") or "unknown",
+    }
 
 
 def configure(cfg: dict) -> None:
@@ -201,6 +466,33 @@ async def post_project(request: Request) -> JSONResponse:
 @router.get("/jobs")
 async def get_jobs() -> JSONResponse:
     return JSONResponse({"jobs": universe_state.jobs(), "states": universe_state.JOB_STATES})
+
+
+@router.get("/observatory")
+async def observatory() -> JSONResponse:
+    """Live mission/agent observability from durable job facts and registries."""
+    hud_jobs = universe_state.jobs()
+    continuation_jobs, continuation_state = await asyncio.to_thread(_continuation_jobs)
+    live_ids = {j.get("id") for j in continuation_jobs}
+    jobs = continuation_jobs + [j for j in hud_jobs if j.get("id") not in live_ids]
+    evidence = universe_state.evidence(240)
+    workers = await asyncio.to_thread(worker_registry, None, _CFG)
+    registry = agent_registry(capability_registry(workers))
+    return JSONResponse({
+        "jobs": [_observatory_job(j, evidence) for j in jobs],
+        "registry_agents": [_observatory_agent(a) for a in registry.get("agents", [])],
+        "identity": {
+            "codex_web_executor": CODEX_WEB_EXECUTOR,
+            "codex_web_model": CODEX_WEB_MODEL,
+        },
+        "continuation": {
+            "state": continuation_state,
+            "authority": "Zod-Continuation" if continuation_state == "LIVE" else "HUD fallback/history",
+            "jobs": len(continuation_jobs),
+        },
+        "reasoning_policy": "Structured reasons and evidence only; raw chain-of-thought is never exposed.",
+        "generated_at": time.time(),
+    })
 
 
 @router.post("/jobs")

@@ -50,6 +50,34 @@ class UniverseObservatoryTests(unittest.TestCase):
         self.assertNotIn("chain_of_thought", saved["agents"][0])
         self.assertNotIn("reasoning", saved["agents"][0])
 
+    def test_regression_raw_and_private_reasoning_stripped_evidence_survives(self):
+        for field in ("chain_of_thought", "chain-of-thought", "cot",
+                      "reasoning", "raw_reasoning", "hidden_reasoning",
+                      "thinking"):
+            self.assertIn(field, universe_state.OBSERVATORY_PRIVATE_REASONING_FIELDS)
+        payload = {
+            "id": "job-evidence",
+            "state": "COMPLETED",
+            "mission": "gate verification",
+            "evidence": ["acceptable finding", "verifiable result"],
+            "agents": [{
+                "id": "auditor",
+                "role": "verification",
+                "raw_reasoning": "must be stripped",
+                "thinking": "also stripped",
+            }],
+        }
+        saved = universe_state.upsert_job(payload)
+        self.assertEqual(saved["mission"], "gate verification")
+        self.assertEqual(saved["evidence"], ["acceptable finding", "verifiable result"])
+        self.assertIn("id", saved["agents"][0])
+        self.assertIn("role", saved["agents"][0])
+        self.assertNotIn("raw_reasoning", saved["agents"][0])
+        self.assertNotIn("thinking", saved["agents"][0])
+        rendered = json.dumps(saved)
+        for field in universe_state.OBSERVATORY_PRIVATE_REASONING_FIELDS:
+            self.assertNotIn(field, rendered)
+
     def test_observatory_uses_exact_codex_web_identity_and_allowlisted_facts(self):
         job = universe_api._observatory_job({
             "id": "job-web",

@@ -45,7 +45,7 @@ OBSERVABILITY_FIELDS = (
     "health", "retries", "handoffs", "failover", "supervisor_interventions",
     "machine_acceptance", "stop", "scarce_tier", "agents",
 )
-_PRIVATE_REASONING_KEYS = {
+OBSERVATORY_PRIVATE_REASONING_FIELDS = {
     "chain_of_thought", "chain-of-thought", "cot", "reasoning", "raw_reasoning",
     "hidden_reasoning", "thinking",
 }
@@ -90,7 +90,7 @@ def _safe_observability(value: Any, depth: int = 0) -> Any:
         out = {}
         for raw_key, raw_value in list(value.items())[:80]:
             key = str(raw_key)[:120]
-            if key.strip().lower() in _PRIVATE_REASONING_KEYS:
+            if key.strip().lower() in OBSERVATORY_PRIVATE_REASONING_FIELDS:
                 continue
             out[key] = _safe_observability(raw_value, depth + 1)
         return out

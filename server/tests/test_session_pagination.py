@@ -72,7 +72,8 @@ class SessionPaginationTests(unittest.TestCase):
         fake = FakeHermes(total, title, target_index, model)
         api = make_api(fake)
         with mock.patch("server.requests.get", fake.get):
-            found, taken = api.find_session_by_title(title, MODEL)
+            found = api.find_session_by_title(title)
+            taken = False
         return found, taken, fake
 
     def test_finds_session_on_first_page(self):
@@ -106,16 +107,56 @@ class SessionPaginationTests(unittest.TestCase):
         fake = FakeHermes(700, "not-present", 0)
         api = make_api(fake)
         with mock.patch("server.requests.get", fake.get):
-            found, taken = api.find_session_by_title("missing-title", MODEL)
+            found = api.find_session_by_title("missing-title")
+            taken = False
         self.assertIsNone(found)
         self.assertFalse(taken)
         self.assertLessEqual(len(fake.requests), 10)
 
-    def test_title_taken_by_a_different_model_is_reported(self):
-        found, taken, _ = self._lookup(total=600, target_index=599,
-                                       model="some-other-model")
-        self.assertIsNone(found)
-        self.assertTrue(taken, "caller must know the title exists under another model")
+    def test_same_title_under_a_different_model_is_the_same_conversation(self):
+        found, _, _ = self._lookup(total=600, target_index=599,
+                                   model="some-other-model")
+        self.assertEqual(found, "api_target")
+
+    def test_persisted_session_is_reused_after_model_change(self):
+        import server
+        api = make_api(FakeHermes(1, "owner-main", 0, target_model="old-model"))
+        api.cfg["model"] = "new-owner-route"
+        api._load_state = lambda: {"owner-main": "api_target"}
+        saved = []
+        api._save_state = lambda state: saved.append(dict(state))
+
+        def get(url, headers=None, params=None, timeout=None):
+            if url.endswith("/api/sessions/api_target"):
+                return mock.Mock(ok=True, status_code=200, json=lambda: {
+                    "session": {"id": "api_target", "title": "owner-main", "model": "old-model"}
+                })
+            raise AssertionError(f"unexpected GET {url}")
+
+        with mock.patch("server.requests.get", get), \
+             mock.patch("server.requests.post") as post:
+            self.assertEqual(api.get_session_id("owner-main"), "api_target")
+        post.assert_not_called()
+        self.assertEqual(saved, [])
+
+    def test_stale_mapping_falls_back_to_exact_title_regardless_of_model(self):
+        fake = FakeHermes(450, "owner-main", 449, target_model="old-model")
+        api = make_api(fake)
+        api.cfg["model"] = "new-owner-route"
+        api._load_state = lambda: {"owner-main": "stale-id"}
+        saved = []
+        api._save_state = lambda state: saved.append(dict(state))
+
+        def get(url, headers=None, params=None, timeout=None):
+            if url.endswith("/api/sessions/stale-id"):
+                return mock.Mock(ok=False, status_code=404)
+            return fake.get(url, headers=headers, params=params, timeout=timeout)
+
+        with mock.patch("server.requests.get", get), \
+             mock.patch("server.requests.post") as post:
+            self.assertEqual(api.get_session_id("owner-main"), "api_target")
+        post.assert_not_called()
+        self.assertEqual(saved[-1], {"owner-main": "api_target"})
 
     def test_stops_when_server_ignores_offset(self):
         """A server that replays page one must not spin us forever."""
@@ -129,7 +170,7 @@ class SessionPaginationTests(unittest.TestCase):
         fake = StuckHermes(1000, "nope", 0)
         api = make_api(fake)
         with mock.patch("server.requests.get", fake.get):
-            found, _ = api.find_session_by_title("missing", MODEL)
+            found = api.find_session_by_title("missing")
         self.assertIsNone(found)
         self.assertLess(len(fake.requests), 600, "scan cap must terminate the loop")
 

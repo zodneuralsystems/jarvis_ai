@@ -245,45 +245,46 @@ class HermesAPI:
                 return
             offset += len(items)
 
-    def find_session_by_title(self, name: str, model: str) -> tuple[str | None, bool]:
-        """Return (session_id_matching_model, title_taken_by_other_model)."""
-        title_taken = False
+    def find_session_by_title(self, name: str) -> str | None:
+        """Return the Hermes session with this exact conversation title.
+
+        Conversation identity is deliberately independent of model identity. A session may
+        have been created while Zod used one model and then continue after the owner route
+        changes to another model/alias. The run itself pins provider/model; the session is
+        only the durable conversation/memory scope.
+        """
         for item in self.iter_sessions():
-            if item.get("title") != name or not item.get("id"):
-                continue
-            if item.get("model") == model:
-                return item["id"], title_taken
-            title_taken = True
-        return None, title_taken
+            if item.get("title") == name and item.get("id"):
+                return item["id"]
+        return None
 
     def get_session_id(self, name: str, force_new: bool = False) -> str:
         state = self._load_state()
         sid = state.get(name)
 
-        def session_matches_model(session_id: str) -> bool:
+        def session_exists(session_id: str) -> bool:
             try:
                 check = requests.get(
                     f"{self.base}/api/sessions/{session_id}",
                     headers=self.headers(),
                     timeout=10,
                 )
-                if not check.ok:
-                    return False
-                session = (check.json().get("session") or check.json())
-                return session.get("model") == self.cfg.get("model")
+                return bool(check.ok)
             except Exception:
                 return False
 
-        if sid and not force_new and session_matches_model(sid):
+        # A model change must never mint a new conversation. `start_run` pins the current
+        # provider/model independently, so a valid persisted Hermes session is reusable
+        # regardless of whichever model created or last touched it.
+        if sid and not force_new and session_exists(sid):
             return sid
         if sid:
             state.pop(name, None)
             self._save_state(state)
 
-        title_taken = False
         if not force_new:
             try:
-                found, title_taken = self.find_session_by_title(name, self.cfg.get("model"))
+                found = self.find_session_by_title(name)
                 if found:
                     state[name] = found
                     self._save_state(state)
@@ -291,19 +292,14 @@ class HermesAPI:
             except Exception:
                 pass
 
-        create_title = name if not (force_new or title_taken) else f"{name}-{int(time.time())}"
+        create_title = name if not force_new else f"{name}-{int(time.time())}"
         r = requests.post(f"{self.base}/api/sessions", headers=self.headers(),
                           json={"title": create_title}, timeout=15)
 
-        if r.status_code == 400 and "invalid_title" in r.text:
-            # Hermes says the title is taken, so the session exists somewhere in
-            # the full list. Re-reading only the first page finds nothing and
-            # falls through to raise_for_status(), surfacing a bare
-            # "400 Bad Request for url: .../api/sessions" — which is exactly how
-            # a long-lived conversation dies once enough newer sessions exist.
-            # It takes typed chat and voice down together, because both resolve
-            # their session through here.
-            found, _ = self.find_session_by_title(name, self.cfg.get("model"))
+        if not force_new and r.status_code == 400 and "invalid_title" in r.text:
+            # A race can create the title between our scan and POST. Search the entire
+            # paginated list again and reuse it; model metadata is irrelevant to identity.
+            found = self.find_session_by_title(name)
             if found:
                 state[name] = found
                 self._save_state(state)
@@ -316,7 +312,7 @@ class HermesAPI:
             raise RuntimeError(f"Hermes session creation returned no id: {data}")
         state[name] = sid
         self._save_state(state)
-        print(f"Created Hermes session '{name}' -> {sid}", flush=True)
+        print(f"Created Hermes session '{create_title}' -> {sid}", flush=True)
         return sid
 
     def stop_run(self, run_id: str) -> dict:

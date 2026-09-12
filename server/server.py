@@ -40,6 +40,8 @@ import requests
 import uvicorn
 import yaml
 import numpy as np
+
+import model_activity
 from anthropic import Anthropic
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, Response
@@ -1040,6 +1042,7 @@ class OperatorRun:
     channel_id: str
     done: asyncio.Future
     strict: bool = False
+    local_model: str = ""
     tools: list[dict] = field(default_factory=list)
     last_tool: str = "Hermes tool"
     pending: PendingOperatorApproval | None = None
@@ -1148,12 +1151,14 @@ class OperatorApprovalBridge:
             raise OperatorBridgeError("Hermes operator run could not be started.", 502) from exc
 
         run_id = started["run_id"]
+        local_model = model_activity.resolve_local_model(CFG)
         run = OperatorRun(
             run_id=run_id,
             session_id=session_id,
             channel_id=channel_id,
             done=asyncio.get_running_loop().create_future(),
             strict=strict,
+            local_model=local_model,
         )
         with self._state_lock:
             channel = self._channels.get(channel_id)
@@ -1168,6 +1173,10 @@ class OperatorApprovalBridge:
                 channel.starting = False
                 channel.runs.add(run_id)
                 self._runs[run_id] = run
+        if not channel_lost and not start_cancelled:
+            # Cross-process memory ownership: Runtime V2 may reclaim this local
+            # model only after this exact Hermes run reaches a terminal state.
+            model_activity.mark_started(run_id, run.local_model)
         if channel_lost or start_cancelled:
             # A newly created run must never become unattended before the HUD
             # can observe it. Stop immediately rather than returning its id.
@@ -1642,6 +1651,10 @@ class OperatorApprovalBridge:
             }
             if not run.done.done():
                 run.done.set_result(result)
+        # A real Hermes terminal event is the only point where the shared busy
+        # claim is released. Failure to record is conservative: Runtime V2 will
+        # keep the model rather than risk unloading an active owner turn.
+        model_activity.mark_finished(run.run_id, run.local_model)
         await self._send(run.channel_id, {
             "type": "operator_run_terminal",
             "run_id": run.run_id,
